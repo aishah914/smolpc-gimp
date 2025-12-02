@@ -1,14 +1,25 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+#![cfg_attr(mobile, tauri::mobile_entry_point)]
+
+mod mcp;
+
+use serde_json::Value;
+
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+fn mcp_list_tools() -> Result<Value, String> {
+    mcp::list_tools()
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[tauri::command]
+fn mcp_call_tool(name: String, arguments: Value) -> Result<Value, String> {
+    mcp::call_tool(&name, arguments)
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            mcp_list_tools,
+            mcp_call_tool,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

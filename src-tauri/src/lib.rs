@@ -4,6 +4,24 @@ mod mcp;
 mod llm_client;
 
 use serde_json::{json, Value};
+use std::process::Command;
+
+#[tauri::command]
+fn start_gimp_mcp_server() -> Result<(), String> {
+    // Update this path to where gimp_mcp_server.py lives on your machine
+    // Example for Windows:
+    let gimp_mcp_dir = r"C:\Users\User\dev\gimp-mcp";
+
+    Command::new("uv")
+        .arg("run")
+        .arg("--directory")
+        .arg(gimp_mcp_dir)
+        .arg("gimp_mcp_server.py")
+        .spawn()
+        .map_err(|e| format!("Failed to start gimp_mcp_server.py: {e}"))?;
+
+    Ok(())
+}
 
 #[tauri::command]
 fn mcp_list_tools() -> Result<Value, String> {
@@ -17,161 +35,167 @@ fn mcp_call_tool(name: String, arguments: Value) -> Result<Value, String> {
 
 #[tauri::command]
 async fn assistant_request(prompt: String) -> Result<Value, String> {
-    // 1) Build a planning prompt that forces JSON output
-    let system_prompt = r#"
-You are an AI assistant that controls GIMP using tools exposed by an MCP server.
+    // STEP 1: Tool selection, small prompt for Ollama
+    let selector_prompt = format!(
+        r#"
+You are a tool selector for a GIMP assistant.
 
-Respond ONLY with valid JSON. DO NOT include any explanation outside of JSON.
-The JSON format MUST be:
+Decide which single tool is best for the user's request.
 
-{
-  "thought": "Short explanation of what you will do",
-  "steps": [
-    {
-      "tool": "tool_name",
-      "arguments": {
-        // JSON arguments for the tool
-      }
-    }
-  ]
-}
+Tools:
+- "get_gimp_info": GIMP version, platform, system, install, environment.
+- "get_image_metadata": what image is open, details of the current image, size, dimensions, file name, layers.
+- "call_api": editing the image (resize, crop, rotate, flip, draw, filters, colors, etc).
+- "none": no tool needed, just answer in natural language.
 
-Tools you can use (for now):
+Return ONLY JSON in this format:
+{{"tool": "get_gimp_info" | "get_image_metadata" | "call_api" | "none", "reason": "short reason"}}
 
-- get_gimp_info
-  Description: Get information about the GIMP environment, version, and setup.
-  Arguments: {}
+The response MUST:
+- Start with '{{'
+- Contain only JSON
+- Have no explanation, no prose, no backticks, no prefix
 
-- get_image_metadata
-  Description: Get metadata about the currently open image: width, height, file name, color mode, etc.
-  Arguments: {}
-
-- call_api
-  Description: Execute Python code inside GIMP via the PyGObject console. Use this for editing actions like crop, resize, rotate, flip, changing colors, applying filters, or exporting.
-  Arguments:
-    {
-      "api_path": "string, required. Use \"exec\" for Python execution",
-      "args": [
-        "pyGObject-console",
-        [
-          "python_code_line_1",
-          "python_code_line_2",
-          "... more lines ..."
-        ]
-      ],
-      "kwargs": "object, usually {}"
-    }
-
-  Rules for call_api:
-  - Always use api_path: "exec"
-  - Always use args[0] = "pyGObject-console"
-  - args[1] must be an array of Python code strings
-  - Typical pattern for working on the active image:
-    [
-      "images = Gimp.get_images()",
-      "image = images[0]",
-      "layers = image.get_layers()",
-      "layer = layers[0]",
-      "drawable = layer"
-    ]
-  - After drawing or editing operations, always call:
-    "Gimp.displays_flush()"
-
-
-- example_tool
-  Description: A fake example tool used for testing. You can give it any JSON arguments.
-
-Rules:
-- Always return a JSON object with "thought" and "steps".
-- "steps" must be an array (possibly empty).
-- Every step must have "tool" (string) and "arguments" (object).
-- If no tool is needed, return "steps": [].
-
-Examples:
-
-User request: "What version of GIMP am I using?"
-Plan:
-{
-  "thought": "I will query GIMP for its version information.",
-  "steps": [
-    { "tool": "get_gimp_info", "arguments": {} }
-  ]
-}
-
-User request: "Tell me about the current image"
-Plan:
-{
-  "thought": "I will inspect metadata of the current image.",
-  "steps": [
-    { "tool": "get_image_metadata", "arguments": {} }
-  ]
-}
-
-User request: "Resize the image to 500 by 300"
-Plan:
-{
-  "thought": "I will resize the current image using Python code via the GIMP console.",
-  "steps": [
-    {
-      "tool": "call_api",
-      "arguments": {
-        "api_path": "exec",
-        "args": [
-          "pyGObject-console",
-          [
-            "images = Gimp.get_images()",
-            "image = images[0]",
-            "image.scale(500, 300)",
-            "Gimp.displays_flush()"
-          ]
-        ],
-        "kwargs": {}
-      }
-    }
-  ]
-}
-
-
-User request: "Crop the image to a 200x200 square"
-Plan:
-{
-  "thought": "I will crop the current image using Python code via the GIMP console.",
-  "steps": [
-    {
-      "tool": "call_api",
-      "arguments": {
-        "api_path": "exec",
-        "args": [
-          "pyGObject-console",
-          [
-            "images = Gimp.get_images()",
-            "image = images[0]",
-            "image.crop(200, 200, 0, 0)",
-            "Gimp.displays_flush()"
-          ]
-        ],
-        "kwargs": {}
-      }
-    }
-  ]
-}
-
-"#;
-
-    let planning_prompt = format!(
-        "{system}\nUser request: {user}",
-        system = system_prompt,
+User request: {user}
+"#,
         user = prompt
     );
 
-    // 2) Ask the LLM for a JSON plan
-    let plan_raw = llm_client::chat(&planning_prompt).await?;
+    let selection_raw = llm_client::chat(&selector_prompt).await?;
 
-    // 3) Parse the JSON plan
-    let plan: Value = serde_json::from_str(&plan_raw)
-        .map_err(|e| format!("Failed to parse plan JSON: {e}\nLLM output was: {plan_raw}"))?;
+    // Strip anything before the first '{' to handle "Here is the response: { ... }"
+    let selection_str = if let Some(idx) = selection_raw.find('{') {
+        &selection_raw[idx..]
+    } else {
+        selection_raw.as_str()
+    };
 
-    // 4) Execute each step via MCP
+    let mut selection: Value = serde_json::from_str(selection_str).map_err(|e| {
+        format!(
+            "Failed to parse tool selection JSON: {e}\nLLM output was: {selection_raw}"
+        )
+    })?;
+
+    let selected_tool = selection
+        .get("tool")
+        .and_then(|t| t.as_str())
+        .unwrap_or("none")
+        .to_string();
+
+    // If selector says no tool, just answer with plain text and return
+    if selected_tool == "none" {
+        let answer_prompt = format!(
+            "You are a helpful assistant that knows about GIMP.\n\
+             Answer the user's question in natural language. Do not mention tools.\n\n\
+             User: {user}\nAssistant:",
+            user = prompt
+        );
+
+        let reply_text = llm_client::chat(&answer_prompt).await?;
+
+        let plan = json!({
+            "thought": "Tool selector chose 'none'. I answered without calling MCP tools.",
+            "tool_selection": selection,
+            "steps": []
+        });
+
+        return Ok(json!({
+            "reply": reply_text,
+            "plan": plan,
+            "tool_results": []
+        }));
+    }
+
+    // STEP 2: Build a plan
+    // For call_api we ask LLM to generate a detailed plan.
+    // For get_gimp_info and get_image_metadata we make a simple one step plan.
+    let mut plan: Value = if selected_tool == "call_api" {
+        let planning_prompt = format!(
+            r#"
+You write Python console commands to control GIMP 3 via the PyGObject console.
+
+User request: {user}
+
+Respond ONLY with valid JSON in this format:
+
+{{
+  "thought": "short explanation",
+  "steps": [
+    {{
+      "tool": "call_api",
+      "arguments": {{
+        "api_path": "exec",
+        "args": [
+          "pyGObject-console",
+          [
+            "images = Gimp.get_images()",
+            "image = images[0]",
+            "layers = image.get_layers()",
+            "layer = layers[0]",
+            "drawable = layer",
+            "... extra commands you need ...",
+            "Gimp.displays_flush()"
+          ]
+        ],
+        "kwargs": {{}}
+      }}
+    }}
+  ]
+}}
+
+Rules:
+- The response MUST start with '{{' and contain only JSON.
+- Always use api_path: "exec".
+- Always use args[0]: "pyGObject-console".
+- args[1] must be a list of valid Python statements.
+- Always include these exact base lines at the top, unchanged:
+
+  "images = Gimp.get_images()",
+  "image = images[0]",
+  "layers = image.get_layers()",
+  "layer = layers[0]",
+  "drawable = layer",
+
+- Never invent attributes or properties like image.active_image or image.layers.
+- To resize the whole image, use: image.scale(new_width, new_height)
+- To get the first layer, use: layers = image.get_layers(); layer = layers[0]
+- Always finish with a line: "Gimp.displays_flush()".
+- Only use the call_api tool in steps.
+"#,
+            user = prompt
+        );
+
+        let plan_raw = llm_client::chat(&planning_prompt).await?;
+
+        // Strip any prefix before JSON
+        let plan_str = if let Some(idx) = plan_raw.find('{') {
+            &plan_raw[idx..]
+        } else {
+            plan_raw.as_str()
+        };
+
+        serde_json::from_str(plan_str).map_err(|e| {
+            format!("Failed to parse plan JSON: {e}\nLLM output was: {plan_raw}")
+        })?
+    } else {
+        // Simple one step plan
+        json!({
+            "thought": format!("Tool selector chose {tool}. I will call it once.", tool = selected_tool),
+            "steps": [
+                {
+                    "tool": selected_tool,
+                    "arguments": {}
+                }
+            ]
+        })
+    };
+
+    // Attach the tool selection into the plan for debugging
+    if let Value::Object(ref mut map) = plan {
+        map.insert("tool_selection".to_string(), selection.clone());
+    }
+
+    // STEP 3: Execute each step via MCP
     let mut tool_results: Vec<Value> = Vec::new();
 
     if let Some(steps) = plan.get("steps").and_then(|s| s.as_array()) {
@@ -189,12 +213,14 @@ Plan:
 
             let result = mcp::call_tool(&tool_name, arguments.clone())
                 .map(|val| val)
-                .unwrap_or_else(|err| json!({
-                    "isError": true,
-                    "content": [
-                        { "text": format!("MCP transport error: {err}"), "type": "text" }
-                    ]
-                }));
+                .unwrap_or_else(|err| {
+                    json!({
+                        "isError": true,
+                        "content": [
+                            { "text": format!("MCP transport error: {err}"), "type": "text" }
+                        ]
+                    })
+                });
 
             tool_results.push(json!({
                 "tool": tool_name,
@@ -204,14 +230,14 @@ Plan:
         }
     }
 
-    // 5) Default reply from the plan's "thought"
+    // STEP 4: Default reply from the plan's "thought"
     let mut reply_text = plan
         .get("thought")
         .and_then(|t| t.as_str())
         .unwrap_or("I created a tool plan for your request.")
         .to_string();
 
-    // 6) SPECIAL CASE: get_gimp_info -> summarise version + platform
+    // STEP 5: SPECIAL CASE: get_gimp_info -> summarise version + platform
     for tr in &tool_results {
         if tr.get("tool").and_then(|t| t.as_str()) == Some("get_gimp_info") {
             let result_val = tr.get("result").cloned().unwrap_or_else(|| json!({}));
@@ -231,15 +257,14 @@ Plan:
             if is_error {
                 if let Some(msg) = text_opt {
                     reply_text = format!(
-                        "I couldn't get GIMP info: {}. Please make sure GIMP is open and the MCP Server plugin is running.",
+                        "I could not get GIMP info: {}. Please make sure GIMP is open and the MCP Server plugin is running.",
                         msg
                     );
                 } else {
                     reply_text =
-                        "I couldn't get GIMP info because the MCP tool reported an error."
+                        "I could not get GIMP info because the MCP tool reported an error."
                             .to_string();
                 }
-                // If this is an error, we don't try to parse JSON
                 continue;
             }
 
@@ -267,7 +292,7 @@ Plan:
         }
     }
 
-    // 7) SPECIAL CASE: get_image_metadata -> summarise current image
+    // STEP 6: SPECIAL CASE: get_image_metadata -> summarise current image
     for tr in &tool_results {
         if tr.get("tool").and_then(|t| t.as_str()) == Some("get_image_metadata") {
             let result_val = tr.get("result").cloned().unwrap_or_else(|| json!({}));
@@ -284,22 +309,20 @@ Plan:
                 .and_then(|first| first.get("text"))
                 .and_then(|t| t.as_str());
 
-            // error case
             if is_error {
                 if let Some(msg) = text_opt {
                     reply_text = format!(
-                        "I couldn't get image metadata: {}. Please make sure an image is open in GIMP.",
+                        "I could not get image metadata: {}. Please make sure an image is open in GIMP.",
                         msg
                     );
                 } else {
                     reply_text =
-                        "I couldn't get image metadata because the MCP tool reported an error."
+                        "I could not get image metadata because the MCP tool reported an error."
                             .to_string();
                 }
                 continue;
             }
 
-            // happy path: parse the metadata JSON (basic + file), like the one you pasted
             if let Some(text_json) = text_opt {
                 if let Ok(meta) = serde_json::from_str::<Value>(text_json) {
                     let basic = meta.get("basic").unwrap_or(&Value::Null);
@@ -334,7 +357,7 @@ Plan:
         }
     }
 
-        // 8) SPECIAL CASE: call_api -> summarise edit actions using real metadata
+    // STEP 7: SPECIAL CASE: call_api -> summarise edit actions using real metadata
     for tr in &tool_results {
         if tr.get("tool").and_then(|t| t.as_str()) == Some("call_api") {
             let arguments_val = tr.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -343,21 +366,13 @@ Plan:
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-        // Owned Vec<Value> to avoid lifetime issues
-            let args_vec: Vec<Value> = arguments_val
-                .get("args")
-                .and_then(|a| a.as_array())
-                .cloned()
-                .unwrap_or_else(Vec::new);
             let result_val = tr.get("result").cloned().unwrap_or_else(|| json!({}));
 
-        // Check the isError flag from MCP
             let is_error_flag = result_val
                 .get("isError")
                 .and_then(|e| e.as_bool())
                 .unwrap_or(false);
 
-        // Pull out text message and structured result, if present
             let text_msg = result_val
                 .get("content")
                 .and_then(|c| c.as_array())
@@ -370,11 +385,9 @@ Plan:
                 .and_then(|sc| sc.get("result"))
                 .and_then(|r| r.as_str());
 
-        // Treat anything that starts with "Error:" as an error,
-        // even if isError == false.
             let looks_like_error =
                 text_msg.map_or(false, |t| t.starts_with("Error:"))
-                || structured_result.map_or(false, |t| t.starts_with("Error:"));
+                    || structured_result.map_or(false, |t| t.starts_with("Error:"));
 
             if is_error_flag || looks_like_error {
                 let msg = structured_result
@@ -388,7 +401,6 @@ Plan:
                 continue;
             }
 
-        // After a successful call_api, ask GIMP what the image looks like now
             let after_meta_raw = mcp::call_tool("get_image_metadata", json!({}))
                 .unwrap_or_else(|err| json!({
                     "isError": true,
@@ -412,9 +424,8 @@ Plan:
                 .and_then(|t| t.as_str());
 
             if after_is_error {
-            // We did an edit, but we can't read back metadata cleanly
                 reply_text = format!(
-                    "I called '{api}', but I couldn't read the updated image metadata. Please check GIMP to see the result.",
+                    "I called '{api}', but I could not read the updated image metadata. Please check GIMP to see the result.",
                     api = api_path
                 );
                 continue;
@@ -472,11 +483,10 @@ Plan:
                     }
                 } else {
                     reply_text = if api_path.is_empty() {
-                        "I performed an edit using call_api, but couldn't parse the updated metadata."
-                            .to_string()
+                        "I performed an edit using call_api, but could not parse the updated metadata.".to_string()
                     } else {
                         format!(
-                            "I performed an edit using '{api}', but couldn't parse the updated metadata.",
+                            "I performed an edit using '{api}', but could not parse the updated metadata.",
                             api = api_path
                         )
                     };
@@ -495,19 +505,17 @@ Plan:
         }
     }
 
-    // 9) Return everything back to the frontend
     Ok(json!({
         "reply": reply_text,
         "plan": plan,
         "tool_results": tool_results
     }))
-    
-    
 }
 
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            start_gimp_mcp_server,
             mcp_list_tools,
             mcp_call_tool,
             assistant_request,

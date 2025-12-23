@@ -5,7 +5,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 
 /// Folder where gimp_mcp_server.py lives
-const GIMP_MCP_PATH: &str = "/Users/aishah/gimp-mcp";
+const GIMP_MCP_PATH: &str = r"C:\Users\User\dev\gimp-mcp";
 
 struct McpConnection {
     #[allow(dead_code)]

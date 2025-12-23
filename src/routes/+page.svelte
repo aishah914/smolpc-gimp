@@ -1,209 +1,270 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
 
-  // ---------------- MCP STUB STATE ----------------
-  let toolsJson = "";
-  let callResultJson = "";
-  let errorMsg = "";
+  type AssistantResponse = {
+  reply: string;
+  plan: any;
+  tool_results: any[];
+  };
 
-  async function listTools() {
-    errorMsg = "";
-    try {
-      const result = await invoke("mcp_list_tools");
-      toolsJson = JSON.stringify(result, null, 2);
-    } catch (err) {
-      errorMsg = String(err);
-    }
-  }
 
-  async function callGetGimpInfo() {
-    errorMsg = "";
-    try {
-      const result = await invoke("mcp_call_tool", {
-        name: "get_gimp_info",
-        arguments: {}
-      });
-      callResultJson = JSON.stringify(result, null, 2);
-    } catch (err) {
-      errorMsg = String(err);
-    }
-  }
+  type Message = {
+    role: "user" | "assistant";
+    text: string;
+  };
 
-  // ---------------- LLM TEST STATE ----------------
-  let llmReply = "";
-  let llmError = "";
-  let llmLoading = false;
+  let messages: Message[] = [];
+  let input = "";
+  let isSending = false;
 
-  async function testLlm() {
-    llmReply = "";
-    llmError = "";
-    llmLoading = true;
+  // Debug / dev results
+  let llmTestResult = "";
+  let toolsListResult = "";
+  let toolCallResult = "";
 
-    try {
-      const result = await invoke("assistant_request", {
-        prompt: "Say hi briefly."
-      }) as { reply: string; steps: unknown[] };
+  // Simple status indicators (you can wire these to real data later)
+  let imageInfo = 'No image info yet';
+  let gimpStatus = 'Disconnected';
+  let llmStatus = 'Ready';
 
-      llmReply = result.reply;
-    } catch (err) {
-      llmError = String(err);
-    } finally {
-      llmLoading = false;
-    }
-  }
-    // ---------------- SIMPLE CHAT STATE ----------------
-  type Message = { role: "user" | "assistant"; content: string };
-
-  let chatMessages: Message[] = [];
-  let chatInput = "";
-  let chatLoading = false;
-  let chatError = "";
-
+  // --- Chat behaviour (assistant_request) ---
   async function sendChat() {
-  const trimmed = chatInput.trim();
-  if (!trimmed || chatLoading) return;
+  const trimmed = input.trim();
+  if (!trimmed || isSending) return;
 
-  chatError = "";
-  const userMessage: Message = { role: "user", content: trimmed };
-  chatMessages = [...chatMessages, userMessage];
-  chatInput = "";
-  chatLoading = true;
+  const userText = trimmed;
+  input = "";
+  messages = [...messages, { role: "user", text: userText }];
+  isSending = true;
 
   try {
-    const result = await invoke("assistant_request", {
-      prompt: userMessage.content
-    }) as {
-      reply: string;
-      plan: any;
-      tool_results: any[];
-    };
+    // Get the full JSON response from Rust
+    const result = await invoke<AssistantResponse>("assistant_request", { prompt: userText });
 
-    console.log("assistant_response", result);      // <-- add this line
+    const replyText =
+      result && typeof result === "object" && "reply" in result
+        ? result.reply
+        : "I created a tool plan for your request.";
 
-    const assistantMessage: Message = {
-      role: "assistant",
-      content: result.reply
-    };
+    // Show reply in chat
+    messages = [...messages, { role: "assistant", text: replyText }];
 
-    chatMessages = [...chatMessages, assistantMessage];
+    // Mark LLM as active
+    llmStatus = "Connected";
 
-    console.log("Plan:", result.plan);
-    console.log("Tool Results:", result.tool_results);
-  } catch (err) {
-    chatError = String(err);
+    // If any tools ran, update status + imageInfo
+    if (Array.isArray(result.tool_results)) {
+      let sawMcp = false;
+
+      for (const tr of result.tool_results) {
+        const toolName = tr?.tool;
+
+        if (toolName === "get_image_metadata") {
+          sawMcp = true;
+          const metaResult = tr?.result ?? {};
+          const isError = !!metaResult?.isError;
+
+          const textJson =
+            metaResult?.content?.[0]?.text && typeof metaResult.content[0].text === "string"
+              ? metaResult.content[0].text
+              : null;
+
+          if (!isError && textJson) {
+            try {
+              const meta = JSON.parse(textJson);
+              const basic = meta.basic ?? {};
+              const file = meta.file ?? {};
+
+              const width = basic.width ?? 0;
+              const height = basic.height ?? 0;
+              const base = basic.base_type ?? "Unknown";
+              const name = file.basename ?? "unknown image";
+
+              imageInfo = `"${name}" — ${width}×${height} px (${base})`;
+            } catch (err) {
+              console.error("Failed to parse image metadata JSON:", err, textJson);
+              imageInfo = "Could not parse image metadata (see console).";
+            }
+          } else if (isError) {
+            imageInfo =
+              "Error getting image metadata. Make sure an image is open in GIMP and MCP is running.";
+          }
+        }
+
+        if (toolName === "get_gimp_info" || toolName === "call_api") {
+          sawMcp = true;
+        }
+      }
+
+      if (sawMcp) {
+        gimpStatus = "Connected";
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    messages = [
+      ...messages,
+      {
+        role: "assistant",
+        text:
+          "Sorry, something went wrong talking to the assistant. Check the developer tools panel and Tauri console for errors."
+      }
+    ];
   } finally {
-    chatLoading = false;
+    isSending = false;
   }
 }
 
-async function callGetImageMetadata() {
-  errorMsg = "";
-  try {
-    const result = await invoke("mcp_call_tool", {
-      name: "get_image_metadata",
-      arguments: {}
-    });
 
-    callResultJson = JSON.stringify(result, null, 2);
-
-  } catch (err) {
-    errorMsg = String(err);
-  }
-}
-
-  function handleChatKeydown(e: KeyboardEvent) {
+  function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendChat();
+      void sendChat();
     }
   }
 
+  // --- Developer tools ---
+
+  async function testLlm() {
+  try {
+    llmStatus = "Checking…";
+    const result = await invoke<string>("test_llm"); // make sure this command exists in Rust
+    llmTestResult = result;
+    llmStatus = "Connected";
+  } catch (e) {
+    console.error(e);
+    llmTestResult = String(e);
+    llmStatus = "Error – see developer tools";
+  }
+}
+
+  async function listTools() {
+  try {
+    gimpStatus = "Checking MCP…";
+    const result = await invoke<string>("mcp_list_tools"); // must match Rust command name
+    toolsListResult = result;
+    gimpStatus = "Connected";
+  } catch (e) {
+    console.error(e);
+    toolsListResult = String(e);
+    gimpStatus = "Disconnected (error)";
+  }
+}
+
+
+  async function callExampleTool() {
+    try {
+      // TODO: replace with an actual tool name and params that work in your setup
+      const result = await invoke<string>("mcp_call_tool", 
+      {
+        tool: "example_tool",
+        params: {}
+      });
+      toolCallResult = result;
+    } catch (e) {
+      console.error(e);
+      toolCallResult = String(e);
+    }
+  }
 </script>
 
-<main style="padding: 1.5rem; font-family: system-ui; max-width: 900px; margin: 0 auto;">
-  <h1>GIMP MCP stdio test</h1>
-
-  <!-- ---------------- MCP BUTTONS ---------------- -->
-  <div style="display: flex; gap: 1rem; margin: 1rem 0;">
-    <button on:click={listTools}>List MCP tools</button>
-    <button on:click={callGetGimpInfo}>Call get_gimp_info()</button>
-    <button on:click={callGetImageMetadata}>Call get_image_metadata()</button>
-  </div>
-
-  {#if errorMsg}
-    <p style="color: red;">{errorMsg}</p>
-  {/if}
-
-  <!-- ---------------- LLM TEST SECTION ---------------- -->
-  <hr style="margin: 1.5rem 0;" />
-
-  <h2>LLM test</h2>
-
-  <button on:click={testLlm} disabled={llmLoading}>
-    {llmLoading ? "Asking LLM..." : "Test LLM"}
-  </button>
-
-  {#if llmError}
-    <p style="color: red;">{llmError}</p>
-  {/if}
-
-  {#if llmReply}
-    <p><strong>LLM reply:</strong> {llmReply}</p>
-  {/if}
-
-  <!-- ---------------- MCP RESULTS ---------------- -->
-  <section style="margin-top: 1rem;">
-    <h2>tools/list result</h2>
-    <pre>{toolsJson}</pre>
-  </section>
-
-  <section style="margin-top: 1rem;">
-    <h2>Tool call result</h2>
-    <pre>{callResultJson}</pre>
-  </section>
-
-  <!-- ---------------- CHAT UI ---------------- -->
-  <hr style="margin: 1.5rem 0;" />
-
-  <section>
-    <h2>Assistant chat (LLM only, no tools yet)</h2>
-
-    <div style="border: 1px solid #ccc; border-radius: 8px; padding: 1rem; min-height: 200px;">
-      {#if chatMessages.length === 0}
-        <p style="color: #666;">Ask something like: “What kind of edits can you help me do in GIMP?”</p>
-      {/if}
-
-      {#each chatMessages as msg}
-        <div style="margin-bottom: 0.75rem;">
-          <strong>{msg.role === "user" ? "You" : "Assistant"}:</strong>
-          <div>{msg.content}</div>
-        </div>
-      {/each}
-
-      {#if chatLoading}
-        <p>Assistant is thinking…</p>
-      {/if}
+<div class="app-shell">
+  <header class="app-header">
+    <div>
+      <h1>SmolPC · GIMP AI Assistant</h1>
+      <span>Offline LLM + MCP · Local-only reasoning</span>
     </div>
+    <div class="badge">
+      <span>Prototype</span>
+    </div>
+  </header>
 
-    {#if chatError}
-      <p style="color: red; margin-top: 0.5rem;">{chatError}</p>
-    {/if}
+  <main class="app-main">
+    <!-- LEFT: Assistant chat -->
+    <section class="app-card">
+      <div class="chat-header">
+        Assistant chat
+        <span class="status-text">
+          {isSending ? "· Thinking…" : "· Ready"}
+        </span>
+      </div>
 
-    <form
-      on:submit|preventDefault={sendChat}
-      style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: flex-end;"
-    >
-      <textarea
-        bind:value={chatInput}
-        on:keydown={handleChatKeydown}
-        rows={2}
-        style="flex: 1; resize: vertical;"
-        placeholder="Describe what you want to do in GIMP and press Enter…"
-      ></textarea>
+      <div class="chat-window">
+        {#if messages.length === 0}
+          <div class="chat-message assistant">
+            <div class="chat-message-header">Assistant</div>
+            <div>
+              Hi! I’m your GIMP assistant. Describe what you want to change in the current image,
+              and I’ll plan and apply edits using local tools.
+            </div>
+          </div>
+        {/if}
 
-      <button type="submit" disabled={chatLoading}>
-        {chatLoading ? "Sending..." : "Send"}
-      </button>
-    </form>
-  </section>
-</main>
+        {#each messages as msg, i}
+          <div class={`chat-message ${msg.role}`}>
+            <div class="chat-message-header">
+              {msg.role === "user" ? "You" : "Assistant"}
+            </div>
+            <div>{msg.text}</div>
+          </div>
+        {/each}
+      </div>
+
+      <div class="chat-input-row">
+        <textarea
+          placeholder="Describe what you want to do in GIMP…"
+          bind:value={input}
+          on:keydown={handleKeydown}
+        ></textarea>
+        <button class="button" on:click={sendChat} disabled={isSending || !input.trim()}>
+          {isSending ? "Sending…" : "Send"}
+        </button>
+      </div>
+    </section>
+
+    <!-- RIGHT: Sidebar (status + dev tools) -->
+    <aside class="app-card">
+      <div class="sidebar-section">
+        <h2>Image & connection</h2>
+        <div class="sidebar-kv">
+          <div><strong>Image:</strong> {imageInfo}</div>
+          <div><strong>GIMP/MCP:</strong> {gimpStatus}</div>
+          <div><strong>LLM:</strong> {llmStatus}</div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <h2>Developer tools</h2>
+        <details class="dev-panel">
+          <summary>LLM test</summary>
+          <button class="button" style="margin-top: 0.4rem;" on:click={testLlm}>
+            Test LLM
+          </button>
+          {#if llmTestResult}
+            <pre>{llmTestResult}</pre>
+          {/if}
+        </details>
+
+        <details class="dev-panel" open>
+          <summary>Tools / list result</summary>
+          <button class="button" style="margin-top: 0.4rem;" on:click={listTools}>
+            List tools
+          </button>
+          {#if toolsListResult}
+            <pre>{toolsListResult}</pre>
+          {/if}
+        </details>
+
+        <details class="dev-panel">
+          <summary>Tool call result</summary>
+          <button class="button" style="margin-top: 0.4rem;" on:click={callExampleTool}>
+            Call example tool
+          </button>
+          {#if toolCallResult}
+            <pre>{toolCallResult}</pre>
+          {/if}
+        </details>
+      </div>
+    </aside>
+  </main>
+</div>

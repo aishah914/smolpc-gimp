@@ -100,6 +100,7 @@ impl McpConnection {
     }
 
     fn send_request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        use std::time::Instant;
         self.ensure_initialized()?;
 
         let id = self.next_id;
@@ -121,9 +122,11 @@ impl McpConnection {
             return Err(format!("Server error: {err}"));
         }
 
-        resp.get("result")
+        return resp.get("result")
             .cloned()
-            .ok_or_else(|| "Missing result in MCP response".to_string())
+            .ok_or_else(|| "Missing result in MCP response".to_string());
+        
+
     }
 
     /// Write one JSON object per line (MCP stdio format)
@@ -210,8 +213,26 @@ pub fn list_tools() -> Result<Value, String> {
     with_connection(|conn| conn.send_request("tools/list", json!({ "cursor": null })))
 }
 
+// pub fn call_tool(name: &str, arguments: Value) -> Result<Value, String> {
+//     with_connection(|conn| {
+//         conn.send_request(
+//             "tools/call",
+//             json!({
+//                 "name": name,
+//                 "arguments": arguments
+//             }),
+//         )
+//     })
+// }
 pub fn call_tool(name: &str, arguments: Value) -> Result<Value, String> {
-    with_connection(|conn| {
+    let start = std::time::Instant::now();
+
+    println!("\n================ MCP CALL ================");
+    println!("Tool: {}", name);
+    println!("Arguments: {}", arguments);
+    println!("------------------------------------------");
+
+    let result = with_connection(|conn| {
         conn.send_request(
             "tools/call",
             json!({
@@ -219,5 +240,20 @@ pub fn call_tool(name: &str, arguments: Value) -> Result<Value, String> {
                 "arguments": arguments
             }),
         )
-    })
+    });
+
+    match result {
+        Ok(response) => {
+            println!("MCP OK ({} ms)", start.elapsed().as_millis());
+            println!("Response: {:#?}", response);
+            println!("==========================================\n");
+            Ok(response)
+        }
+        Err(err) => {
+            println!("MCP ERROR ({} ms)", start.elapsed().as_millis());
+            println!("Error: {}", err);
+            println!("==========================================\n");
+            Err(err)
+        }
+    }
 }

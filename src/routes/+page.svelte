@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
 
   type AssistantResponse = {
     reply: string;
@@ -18,144 +19,95 @@
       text: "Hi! I'm your GIMP AI assistant. How can I help you?"
     }
   ];
+  
   let input = "";
   let isSending = false;
   let imageInfo = 'No image';
   let isConnected = false;
   let showDevTools = false;
 
-  // Developer tools
+  // Status variables for dev tools
+  let llmStatus = "Disconnected";
+  let gimpStatus = "Disconnected";
   let llmTestResult = "";
   let toolsListResult = "";
+  let toolCallResult = "";
+  let actionLog: string[] = [];
+  let planRunResult: string | null = null;
+
+  function logAction(msg: string) {
+    actionLog = [msg, ...actionLog].slice(0, 20);
+  }
 
   async function testLlm() {
     try {
+      llmStatus = "Checking...";
       const result = await invoke<string>("test_llm");
       llmTestResult = result;
+      llmStatus = "Connected";
     } catch (e) {
       console.error(e);
       llmTestResult = String(e);
+      llmStatus = "Error";
     }
   }
 
   async function listTools() {
     try {
-      const result = await invoke<string>("mcp_list_tools");
-      toolsListResult = result;
+      gimpStatus = "Checking MCP...";
+      const result = await invoke<any>("mcp_list_tools");
+      toolsListResult = JSON.stringify(result, null, 2);
+      gimpStatus = "Connected";
     } catch (e) {
       console.error(e);
       toolsListResult = String(e);
+      gimpStatus = "Disconnected";
     }
   }
 
-  async function drawBlackLine() {
-    // Add user message as if they asked
-    messages = [...messages, { 
-      role: "user", 
-      text: "Draw a black line on the image" 
-    }];
-
+  async function runDrawTestLine() {
     try {
-      const result = await invoke<string>("mcp_call_tool", {
-        name: "call_api",
-        arguments: {
-          api_path: "exec",
-          args: [
-            "pyGObject-console",
-            [
-              "images = Gimp.get_images()",
-              "image = images[0]",
-              "layers = image.get_layers()",
-              "layer = layers[0]",
-              "drawable = layer",
-              "Gimp.pencil(drawable, [50, 50, 200, 200])",
-              "Gimp.displays_flush()"
-            ]
-          ],
-          kwargs: {}
-        }
-      });
-      
-      // Always respond with success
-      messages = [...messages, { 
-        role: "assistant", 
-        text: "Sure! Done. I've drawn a black line on your image." 
-      }];
-      
-      console.log("Draw line result:", result);
+      logAction("Running: Draw test line...");
+      await invoke("macro_draw_line", { x1: 50, y1: 50, x2: 200, y2: 200 });
+      logAction("✅ Draw line OK");
     } catch (e) {
-      console.error(e);
-      // Even on error, show success message for demo
-      messages = [...messages, { 
-        role: "assistant", 
-        text: "Sure! Done. I've drawn a black line on your image." 
-      }];
+      logAction("❌ Draw line failed: " + String(e));
+    }
+  }
+
+  async function runCropSquare() {
+    try {
+      logAction("Running: Crop square...");
+      await invoke("macro_crop_square");
+      logAction("✅ Crop square OK");
+    } catch (e) {
+      logAction("❌ Crop square failed: " + String(e));
+    }
+  }
+
+  async function runResize1024() {
+    try {
+      logAction("Running: Resize width to 1024...");
+      await invoke("macro_resize", { width: 1024 });
+      logAction("✅ Resize OK");
+    } catch (e) {
+      logAction("❌ Resize failed: " + String(e));
     }
   }
 
   async function sendChat() {
     const trimmed = input.trim();
     if (!trimmed || isSending) return;
-
-    const userText = trimmed;
     input = "";
-    messages = [...messages, { role: "user", text: userText }];
+    messages = [...messages, { role: "user", text: trimmed }];
     isSending = true;
 
     try {
-      const result = await invoke<AssistantResponse>("assistant_request", { prompt: userText });
-
-      const replyText =
-        result && typeof result === "object" && "reply" in result
-          ? result.reply
-          : "I created a tool plan for your request.";
-
-      messages = [...messages, { role: "assistant", text: replyText }];
+      const result = await invoke<AssistantResponse>("assistant_request", { prompt: trimmed });
+      messages = [...messages, { role: "assistant", text: result.reply || "Done." }];
       isConnected = true;
-
-      if (Array.isArray(result.tool_results)) {
-        for (const tr of result.tool_results) {
-          const toolName = tr?.tool;
-
-          if (toolName === "get_image_metadata") {
-            const metaResult = tr?.result ?? {};
-            const isError = !!metaResult?.isError;
-
-            const textJson =
-              metaResult?.content?.[0]?.text && typeof metaResult.content[0].text === "string"
-                ? metaResult.content[0].text
-                : null;
-
-            if (!isError && textJson) {
-              try {
-                const meta = JSON.parse(textJson);
-                const basic = meta.basic ?? {};
-                const file = meta.file ?? {};
-
-                const width = basic.width ?? 0;
-                const height = basic.height ?? 0;
-                const name = file.basename ?? "unknown image";
-
-                imageInfo = `${name} · ${width}×${height}px`;
-              } catch (err) {
-                console.error("Failed to parse image metadata JSON:", err);
-                imageInfo = "Error reading image";
-              }
-            } else if (isError) {
-              imageInfo = "No image open";
-            }
-          }
-        }
-      }
     } catch (e) {
-      console.error(e);
-      messages = [
-        ...messages,
-        {
-          role: "assistant",
-          text: "Sorry, something went wrong. Make sure GIMP is running with an image open."
-        }
-      ];
+      messages = [...messages, { role: "assistant", text: "Error: " + String(e) }];
       isConnected = false;
     } finally {
       isSending = false;
@@ -171,15 +123,13 @@
 </script>
 
 <div class="container">
-  <!-- Header with title and dev tools toggle -->
-  <div class="header">
-    <h1>Chat</h1>
-    <button class="dev-toggle" on:click={() => showDevTools = !showDevTools}>
+  <header class="header">
+    <h1>GIMP AI Assistant</h1>
+    <button class="dev-toggle" on:click={() => (showDevTools = !showDevTools)}>
       {showDevTools ? "✕" : "⋯"}
     </button>
-  </div>
+  </header>
 
-  <!-- Status bar -->
   <div class="status-bar">
     <div class="status-item">
       <div class="status-dot" class:connected={isConnected}></div>
@@ -187,330 +137,84 @@
     </div>
   </div>
 
-  <!-- Developer tools (hidden by default) -->
-  {#if showDevTools}
-    <div class="dev-tools">
-      <h3 class="dev-title">Developer Tools</h3>
-      <div class="dev-section">
-        <button class="dev-button" on:click={testLlm}>Test LLM</button>
-        {#if llmTestResult}
-          <pre>{llmTestResult}</pre>
-        {/if}
+  <main class="main-layout">
+    <section class="chat-section">
+      <div class="chat-container">
+        {#each messages as msg}
+          <div class="message {msg.role}">
+            <div class="message-content">{msg.text}</div>
+          </div>
+        {/each}
       </div>
-      <div class="dev-section">
-        <button class="dev-button" on:click={listTools}>List Tools</button>
-        {#if toolsListResult}
-          <pre>{toolsListResult}</pre>
-        {/if}
-      </div>
-    </div>
-  {/if}
 
-  <!-- Chat area -->
-  <div class="chat-container">
-    {#each messages as msg}
-      <div class="message {msg.role}">
-        <div class="message-content">{msg.text}</div>
+      <div class="input-container">
+        <textarea
+          placeholder="Type a message..."
+          bind:value={input}
+          on:keydown={handleKeydown}
+          disabled={isSending}
+        ></textarea>
+        <button on:click={sendChat} disabled={isSending || !input.trim()}>
+          {isSending ? "..." : "↑"}
+        </button>
       </div>
-    {/each}
-  </div>
+    </section>
 
-  <!-- Input area -->
-  <div class="input-container">
-    <textarea
-      placeholder="Message"
-      bind:value={input}
-      on:keydown={handleKeydown}
-      disabled={isSending}
-      rows="1"
-    ></textarea>
-    <button on:click={sendChat} disabled={isSending || !input.trim()}>
-      {isSending ? "..." : "↑"}
-    </button>
-  </div>
+    {#if showDevTools}
+      <aside class="sidebar">
+        <div class="sidebar-section">
+          <h2>Developer Tools</h2>
+          
+          <details class="dev-panel">
+            <summary>LLM Status: {llmStatus}</summary>
+            <button class="dev-button" on:click={testLlm}>Test Connection</button>
+            {#if llmTestResult}<pre>{llmTestResult}</pre>{/if}
+          </details>
+
+          <details class="dev-panel">
+            <summary>GIMP Status: {gimpStatus}</summary>
+            <button class="dev-button" on:click={listTools}>Refresh Tools</button>
+            {#if toolsListResult}<pre>{toolsListResult}</pre>{/if}
+          </details>
+
+          <details class="dev-panel" open>
+            <summary>Quick Actions</summary>
+            <div class="button-grid">
+              <button class="dev-button" on:click={runDrawTestLine}>✏️ Line</button>
+              <button class="dev-button" on:click={runCropSquare}>✂️ Crop</button>
+              <button class="dev-button" on:click={runResize1024}>📐 Resize</button>
+            </div>
+            {#if actionLog.length > 0}
+              <pre class="log">{actionLog.join("\n")}</pre>
+            {/if}
+          </details>
+        </div>
+      </aside>
+    {/if}
+  </main>
 </div>
 
 <style>
   :global(body) {
     margin: 0;
     padding: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+    font-family: -apple-system, sans-serif;
     background: #f5f5f7;
   }
-
-  .container {
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    max-width: 900px;
-    margin: 0 auto;
-    background: white;
-  }
-
-  /* Header */
-  .header {
-    padding: 16px 20px;
-    border-bottom: 1px solid #d1d1d6;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: white;
-  }
-
-  .header h1 {
-    font-size: 17px;
-    font-weight: 600;
-    margin: 0;
-    color: #1c1c1e;
-    letter-spacing: -0.3px;
-  }
-
-  .dev-toggle {
-    width: 32px;
-    height: 32px;
-    border: none;
-    border-radius: 16px;
-    background: transparent;
-    color: #8e8e93;
-    font-size: 18px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s;
-  }
-
-  .dev-toggle:hover {
-    background: #f2f2f7;
-  }
-
-  /* Status bar */
-  .status-bar {
-    padding: 8px 20px;
-    border-bottom: 1px solid #f2f2f7;
-    display: flex;
-    align-items: center;
-    background: #fafafa;
-  }
-
-  .status-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    color: #8e8e93;
-  }
-
-  .status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #c7c7cc;
-    transition: background 0.3s;
-  }
-
-  .status-dot.connected {
-    background: #34c759;
-  }
-
-  /* Developer tools */
-  .dev-tools {
-    padding: 16px 20px;
-    background: #f9f9f9;
-    border-bottom: 1px solid #e5e5ea;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .dev-title {
-    font-size: 13px;
-    font-weight: 600;
-    margin: 0 0 8px 0;
-    color: #1c1c1e;
-    letter-spacing: -0.2px;
-    text-transform: uppercase;
-    color: #8e8e93;
-  }
-
-  .dev-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .dev-button {
-    padding: 8px 16px;
-    border: 1px solid #d1d1d6;
-    border-radius: 8px;
-    background: white;
-    color: #1c1c1e;
-    font-size: 13px;
-    cursor: pointer;
-    transition: all 0.2s;
-    width: fit-content;
-  }
-
-  .dev-button:hover {
-    background: #f2f2f7;
-  }
-
-  .dev-tools pre {
-    background: white;
-    border: 1px solid #e5e5ea;
-    border-radius: 8px;
-    padding: 12px;
-    font-size: 11px;
-    overflow-x: auto;
-    margin: 0;
-    color: #3a3a3c;
-  }
-
-  /* Chat area */
-  .chat-container {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .welcome {
-    text-align: center;
-    margin-top: 60px;
-    color: #8e8e93;
-  }
-
-  .welcome-icon {
-    font-size: 48px;
-    margin-bottom: 16px;
-    filter: grayscale(20%);
-  }
-
-  .welcome h2 {
-    font-size: 20px;
-    font-weight: 600;
-    margin: 0 0 8px 0;
-    color: #1c1c1e;
-    letter-spacing: -0.4px;
-  }
-
-  .welcome p {
-    font-size: 13px;
-    margin: 0;
-  }
-
-  .message {
-    display: flex;
-    margin-bottom: 4px;
-  }
-
-  .message.user {
-    justify-content: flex-end;
-  }
-
-  .message-content {
-    max-width: 75%;
-    padding: 10px 14px;
-    border-radius: 18px;
-    font-size: 15px;
-    line-height: 1.4;
-  }
-
-  .message.user .message-content {
-    background: #e5e5ea;
-    color: #1c1c1e;
-    border-bottom-right-radius: 4px;
-  }
-
-  .message.assistant .message-content {
-    background: #f2f2f7;
-    color: #1c1c1e;
-    border-bottom-left-radius: 4px;
-  }
-
-  /* Input area */
-  .input-container {
-    padding: 12px 20px 20px 20px;
-    border-top: 1px solid #e5e5ea;
-    display: flex;
-    gap: 8px;
-    align-items: flex-end;
-    background: white;
-  }
-
-  textarea {
-    flex: 1;
-    border: 1px solid #d1d1d6;
-    border-radius: 20px;
-    padding: 8px 14px;
-    font-size: 15px;
-    font-family: inherit;
-    resize: none;
-    outline: none;
-    transition: border-color 0.2s;
-    min-height: 36px;
-    max-height: 120px;
-    color: #1c1c1e;
-  }
-
-  textarea::placeholder {
-    color: #8e8e93;
-  }
-
-  textarea:focus {
-    border-color: #8e8e93;
-  }
-
-  textarea:disabled {
-    background: #f2f2f7;
-    cursor: not-allowed;
-  }
-
-  button {
-    width: 36px;
-    height: 36px;
-    border: none;
-    border-radius: 50%;
-    background: #8e8e93;
-    color: white;
-    font-size: 18px;
-    font-weight: 600;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s;
-    flex-shrink: 0;
-  }
-
-  button:hover:not(:disabled) {
-    background: #636366;
-    transform: scale(1.05);
-  }
-
-  button:disabled {
-    background: #c7c7cc;
-    cursor: not-allowed;
-    transform: none;
-  }
-
-  /* Scrollbar styling */
-  .chat-container::-webkit-scrollbar {
-    width: 8px;
-  }
-
-  .chat-container::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .chat-container::-webkit-scrollbar-thumb {
-    background: #d1d1d6;
-    border-radius: 4px;
-  }
-
-  .chat-container::-webkit-scrollbar-thumb:hover {
-    background: #c7c7cc;
-  }
+  .container { display: flex; flex-direction: column; height: 100vh; background: white; }
+  .header { padding: 16px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
+  .main-layout { display: flex; flex: 1; overflow: hidden; }
+  .chat-section { flex: 1; display: flex; flex-direction: column; }
+  .chat-container { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+  .sidebar { width: 300px; border-left: 1px solid #ddd; background: #fafafa; padding: 15px; overflow-y: auto; }
+  .message.user { align-self: flex-end; background: #007aff; color: white; border-radius: 15px; padding: 10px; }
+  .message.assistant { align-self: flex-start; background: #e9e9eb; border-radius: 15px; padding: 10px; }
+  .input-container { padding: 20px; border-top: 1px solid #ddd; display: flex; gap: 10px; }
+  textarea { flex: 1; border-radius: 10px; padding: 10px; border: 1px solid #ccc; resize: none; }
+  .dev-panel { margin-bottom: 10px; padding: 5px; border-bottom: 1px solid #eee; }
+  .dev-button { margin-top: 5px; cursor: pointer; }
+  .button-grid { display: flex; gap: 5px; flex-wrap: wrap; }
+  pre { font-size: 10px; background: #eee; padding: 5px; border-radius: 5px; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: red; display: inline-block; }
+  .status-dot.connected { background: green; }
 </style>

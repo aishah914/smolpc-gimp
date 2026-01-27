@@ -2,9 +2,26 @@
 
 mod mcp;
 mod llm_client;
+mod macros; 
+mod plan_schema;
+mod plan_validate;
+mod plan_execute;
+mod commands;
+mod plan_llm;
 
 use serde_json::{json, Value};
 use std::process::Command;
+
+use serde::Serialize;
+#[derive(Serialize)]
+struct HealthStatus {
+    ollama_reachable: bool,
+    mcp_connected: bool,
+    tools_count: u32,
+    image_open_ok: bool,
+    errors: Vec<String>,
+}
+
 
 #[tauri::command]
 fn start_gimp_mcp_server() -> Result<(), String> {
@@ -35,6 +52,23 @@ fn mcp_call_tool(name: String, arguments: Value) -> Result<Value, String> {
 
 #[tauri::command]
 async fn assistant_request(prompt: String) -> Result<Value, String> {
+    let lower_prompt = prompt.to_lowercase();
+
+    // Fast Path: Describe Image
+    if lower_prompt.contains("describe") && lower_prompt.contains("image") {
+        return mcp::call_tool("get_image_metadata", json!({}));
+    }
+
+    // Fast Path: Drawing
+    if lower_prompt.contains("draw") && lower_prompt.contains("line") {
+        // You mentioned macros work, so call them directly here
+        return macro_draw_line(50, 50, 200, 200); 
+    }
+
+    // Fast Path: Basic Edits
+    if lower_prompt.contains("crop") && lower_prompt.contains("square") {
+        return macro_crop_square();
+    }
     // STEP 1: Tool selection, small prompt for Ollama
     let selector_prompt = format!(
         r#"
@@ -70,7 +104,7 @@ User request: {user}
         selection_raw.as_str()
     };
 
-    let mut selection: Value = serde_json::from_str(selection_str).map_err(|e| {
+    let selection: Value = serde_json::from_str(selection_str).map_err(|e| {
         format!(
             "Failed to parse tool selection JSON: {e}\nLLM output was: {selection_raw}"
         )
@@ -512,6 +546,158 @@ Rules:
     }))
 }
 
+#[tauri::command]
+async fn health_check() -> HealthStatus {
+    let mut errors = Vec::new();
+
+    // --- Check 1: Ollama reachable ---
+    let ollama_reachable = match reqwest::get("http://localhost:11434").await {
+        Ok(_) => true,
+        Err(e) => {
+            errors.push(format!("Ollama not reachable: {}", e));
+            false
+        }
+    };
+
+    // --- Check 2: MCP server reachable ---
+    let mcp_connected = true; // TEMP: replace with real MCP init/ping later
+
+    // --- Check 3: MCP tools available ---
+    let tools_count = 0; // TEMP: replace with list_tools() later
+
+    // --- Check 4: GIMP image open ---
+    let image_open_ok = false; // TEMP: replace with get_image_metadata() later
+
+    HealthStatus {
+        ollama_reachable,
+        mcp_connected,
+        tools_count,
+        image_open_ok,
+        errors,
+    }
+}
+
+#[tauri::command]
+async fn test_basic_mcp() -> String {
+    let mut output = String::new();
+
+    // --- Test 1: list MCP tools ---
+    match mcp_list_tools() {
+        Ok(tools) => {
+            output.push_str("MCP tools:\n");
+            output.push_str(&format!("{:#?}\n\n", tools));
+        }
+        Err(e) => {
+            output.push_str(&format!("❌ list_tools failed: {}\n\n", e));
+        }
+    }
+
+    // --- Test 2: get image metadata ---
+    match mcp_list_tools(){
+        Ok(meta) => {
+            output.push_str("Image metadata:\n");
+            output.push_str(&format!("{:#?}\n", meta));
+        }
+        Err(e) => {
+            output.push_str(&format!("❌ get_image_metadata failed: {}\n", e));
+        }
+    }
+
+    output
+}
+
+#[tauri::command]
+fn macro_draw_line(x1: i32, y1: i32, x2: i32, y2: i32) -> Result<serde_json::Value, String> {
+    // Build the payload (JSON) using the macro helper
+    let payload = macros::draw_line(x1, y1, x2, y2);
+
+    //  MCP layer expects: call_tool(name, arguments)
+    // Our macro payload shape is: { "name": "...", "arguments": {...} }
+    let tool_name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Macro payload missing 'name'".to_string())?;
+
+    let arguments = payload
+        .get("arguments")
+        .cloned()
+        .ok_or_else(|| "Macro payload missing 'arguments'".to_string())?;
+
+    // Execute via MCP
+    mcp::call_tool(tool_name, arguments)
+}
+
+#[tauri::command]
+fn macro_crop_square() -> Result<serde_json::Value, String> {
+    let payload = macros::crop_to_square();
+
+    let tool_name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Macro payload missing 'name'".to_string())?;
+
+    let arguments = payload
+        .get("arguments")
+        .cloned()
+        .ok_or_else(|| "Macro payload missing 'arguments'".to_string())?;
+
+    mcp::call_tool(tool_name, arguments)
+}
+
+#[tauri::command]
+fn macro_resize(width: i32) -> Result<serde_json::Value, String> {
+    let payload = macros::resize_width(width);
+
+    let tool_name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Macro payload missing 'name'".to_string())?;
+
+    let arguments = payload
+        .get("arguments")
+        .cloned()
+        .ok_or_else(|| "Macro payload missing 'arguments'".to_string())?;
+
+    mcp::call_tool(tool_name, arguments)
+}
+
+#[tauri::command]
+fn macro_brightness_contrast(brightness: f64, contrast: f64) -> Result<serde_json::Value, String> {
+    let payload = macros::brightness_contrast(brightness, contrast);
+
+    let tool_name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Macro payload missing 'name'".to_string())?;
+
+    let arguments = payload
+        .get("arguments")
+        .cloned()
+        .ok_or_else(|| "Macro payload missing 'arguments'".to_string())?;
+
+    mcp::call_tool(tool_name, arguments)
+}
+
+#[tauri::command]
+fn macro_blur(radius: f64) -> Result<serde_json::Value, String> {
+    let payload = macros::blur(radius);
+
+    let tool_name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Macro payload missing 'name'".to_string())?;
+
+    let arguments = payload
+        .get("arguments")
+        .cloned()
+        .ok_or_else(|| "Macro payload missing 'arguments'".to_string())?;
+
+    mcp::call_tool(tool_name, arguments)
+}
+
+
+
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -519,6 +705,15 @@ pub fn run() {
             mcp_list_tools,
             mcp_call_tool,
             assistant_request,
+            health_check,
+            test_basic_mcp, 
+            macro_draw_line, 
+            macro_crop_square, 
+            macro_resize,
+            macro_brightness_contrast, 
+            macro_blur, 
+            commands::run_action_plan,
+
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

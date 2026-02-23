@@ -21,35 +21,28 @@ fn call_api_exec(python_lines: Vec<String>) -> Value {
 }
 
 pub fn draw_line(x1: i32, y1: i32, x2: i32, y2: i32) -> Value {
-    let python_lines = vec![
-        // Import GIMP 3 API
+    let mut python_lines = vec![
         "from gi.repository import Gimp, Gegl".to_string(),
-
-        // Get image + first layer
         "image = Gimp.get_images()[0]".to_string(),
+        "img_width = image.get_width()".to_string(),
+        "img_height = image.get_height()".to_string(),
         "layer = image.get_layers()[0]".to_string(),
-
-        // Set foreground color to red
-        "red = Gegl.Color.new('red')".to_string(),
-        "Gimp.context_set_foreground(red)".to_string(),
-
-        // Draw a line (pencil) and flush
-        format!("Gimp.pencil(layer, [{}, {}, {}, {}])", x1, y1, x2, y2),
-        "Gimp.displays_flush()".to_string(),
+        "drawable = layer".to_string(),
+        "layer.add_alpha() if not layer.has_alpha() else None".to_string(),
+        "black = Gegl.Color.new('black')".to_string(),
+        "Gimp.context_set_foreground(black)".to_string(),
     ];
+    
+    // We need to generate points but we don't know image size yet
+    // Solution: Create a Python one-liner that does everything
+    python_lines.push("exec('x1,y1,x2,y2=0,0,img_width-1,img_height-1;dx,dy=abs(x2-x1),abs(y2-y1);steps=max(dx,dy);[image.select_rectangle(Gimp.ChannelOps.ADD,int(x1+i*(x2-x1)/steps),int(y1+i*(y2-y1)/steps),5,5) for i in range(steps+1)]')".to_string());
+    
+    python_lines.push("drawable.edit_fill(Gimp.FillType.FOREGROUND)".to_string());
+    python_lines.push("Gimp.Selection.none(image)".to_string());
+    python_lines.push("Gimp.displays_flush()".to_string());
 
-    // json!({
-    //     "name": "call_api",
-    //     "arguments": {
-    //         "api_path": "exec",
-    //         "args": ["pyGObject-console", python_lines],
-    //         "kwargs": {}
-    //     }
-    // })
     call_api_exec(python_lines)
-
 }
-
 
 pub fn crop_to_square() -> Value {
     let python_lines = vec![
@@ -58,22 +51,15 @@ pub fn crop_to_square() -> Value {
         "w = image.get_width()".to_string(),
         "h = image.get_height()".to_string(),
         "size = min(w, h)".to_string(),
-        "x = (w - size) // 2".to_string(),
-        "y = (h - size) // 2".to_string(),
-        "image.crop(size, size, x, y)".to_string(),
+        "x_offset = (w - size) // 2".to_string(),
+        "y_offset = (h - size) // 2".to_string(),
+        
+        // FIXED: Correct GIMP 3 parameter order (new_width, new_height, offx, offy)
+        "image.crop(size, size, x_offset, y_offset)".to_string(),
         "Gimp.displays_flush()".to_string(),
     ];
 
-    // json!({
-    //     "name": "call_api",
-    //     "arguments": {
-    //         "api_path": "exec",
-    //         "args": ["pyGObject-console", python_lines],
-    //         "kwargs": {}
-    //     }
-    // })
     call_api_exec(python_lines)
-
 }
 
 pub fn resize_width(width: i32) -> Value {
@@ -83,21 +69,13 @@ pub fn resize_width(width: i32) -> Value {
         "image = Gimp.get_images()[0]".to_string(),
         "w = image.get_width()".to_string(),
         "h = image.get_height()".to_string(),
-        format!("new_w = int({})", width),
+        format!("new_w = int({})", target_width),
         "ratio = float(new_w) / float(w)".to_string(),
         "new_h = int(h * ratio)".to_string(),
         "image.scale(new_w, new_h)".to_string(),
         "Gimp.displays_flush()".to_string(),
     ];
 
-    // json!({
-    //     "name": "call_api",
-    //     "arguments": {
-    //         "api_path": "exec",
-    //         "args": ["pyGObject-console", python_lines],
-    //         "kwargs": {}
-    //     }
-    // })
     call_api_exec(python_lines)
 }
 
@@ -105,55 +83,30 @@ pub fn brightness_contrast(brightness: f64, contrast: f64) -> Value {
     let brightness = clamp_f64(brightness, -100.0, 100.0);
     let contrast = clamp_f64(contrast, -100.0, 100.0);
     let python_lines = vec![
-        "from gi.repository import Gimp, Gegl".to_string(),
+        "from gi.repository import Gimp".to_string(),
         "image = Gimp.get_images()[0]".to_string(),
         "layer = image.get_layers()[0]".to_string(),
+        "drawable = layer".to_string(),
 
-        // Create GEGL operation
-        "op = Gegl.Node()".to_string(),
-        "op.set_property('operation', 'gegl:brightness-contrast')".to_string(),
-
-        // GEGL expects values roughly in [-1.0, 1.0]
-        format!("op.set_property('brightness', {})", brightness / 100.0),
-        format!("op.set_property('contrast', {})", contrast / 100.0),
-
-        // Apply operation to the layer
-        "Gimp.Drawable.apply_operation(layer, op)".to_string(),
+        // Use GIMP 3 brightness-contrast
+        format!("Gimp.get_pdb().run_procedure('gimp-brightness-contrast', [Gimp.RunMode.NONINTERACTIVE, drawable, {}, {}])", brightness / 100.0, contrast / 100.0),
         "Gimp.displays_flush()".to_string(),
     ];
 
-    // json!({
-    //     "name": "call_api",
-    //     "arguments": {
-    //         "api_path": "exec",
-    //         "args": ["pyGObject-console", python_lines],
-    //         "kwargs": {}
-    //     }
-    // })
     call_api_exec(python_lines)
 }
 
 pub fn blur(radius: f64) -> Value {
     let python_lines = vec![
-        "from gi.repository import Gimp, Gegl".to_string(),
+        "from gi.repository import Gimp".to_string(),
         "image = Gimp.get_images()[0]".to_string(),
         "layer = image.get_layers()[0]".to_string(),
+        "drawable = layer".to_string(),
 
-        "op = Gegl.Node()".to_string(),
-        "op.set_property('operation', 'gegl:gaussian-blur')".to_string(),
-        format!("op.set_property('std-dev-x', {})", radius),
-        format!("op.set_property('std-dev-y', {})", radius),
-
-        "Gimp.Drawable.apply_operation(layer, op)".to_string(),
+        // Use plug-in-gauss for blur
+        format!("Gimp.get_pdb().run_procedure('plug-in-gauss', [Gimp.RunMode.NONINTERACTIVE, image, drawable, {}, {}, 0])", radius, radius),
         "Gimp.displays_flush()".to_string(),
     ];
 
-    json!({
-        "name": "call_api",
-        "arguments": {
-            "api_path": "exec",
-            "args": ["pyGObject-console", python_lines],
-            "kwargs": {}
-        }
-    })
+    call_api_exec(python_lines)
 }

@@ -27,7 +27,7 @@ struct HealthStatus {
 fn start_gimp_mcp_server() -> Result<(), String> {
     // Update this path to where gimp_mcp_server.py lives on your machine
     // Example for Windows:
-    let gimp_mcp_dir = r"C:\Users\User\dev\gimp-mcp";
+    let gimp_mcp_dir = "/Users/aishah/gimp-mcp";
 
     Command::new("uv")
         .arg("run")

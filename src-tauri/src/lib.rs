@@ -50,6 +50,34 @@ fn mcp_call_tool(name: String, arguments: Value) -> Result<Value, String> {
     mcp::call_tool(&name, arguments)
 }
 
+/// Extract a CSS colour name from a lowercase prompt string.
+/// Defaults to "blue" if no recognised colour is found.
+fn extract_color(lower: &str) -> &'static str {
+    if lower.contains("red")     { "red" }
+    else if lower.contains("blue")    { "blue" }
+    else if lower.contains("green")   { "green" }
+    else if lower.contains("yellow")  { "yellow" }
+    else if lower.contains("orange")  { "orange" }
+    else if lower.contains("purple")  { "purple" }
+    else if lower.contains("pink")    { "pink" }
+    else if lower.contains("cyan")    { "cyan" }
+    else if lower.contains("magenta") { "magenta" }
+    else if lower.contains("brown")   { "brown" }
+    else if lower.contains("grey") || lower.contains("gray") { "gray" }
+    else if lower.contains("black")   { "black" }
+    else if lower.contains("white")   { "white" }
+    else { "blue" }
+}
+
+/// Call an MCP tool from a macro payload `{ "name": "...", "arguments": {...} }`.
+fn run_macro(payload: Value) -> Result<Value, String> {
+    let tool_name = payload.get("name").and_then(|v| v.as_str())
+        .ok_or_else(|| "Macro payload missing 'name'".to_string())?;
+    let arguments = payload.get("arguments").cloned()
+        .ok_or_else(|| "Macro payload missing 'arguments'".to_string())?;
+    mcp::call_tool(tool_name, arguments)
+}
+
 #[tauri::command]
 async fn assistant_request(prompt: String) -> Result<Value, String> {
     let lower_prompt = prompt.to_lowercase();
@@ -59,15 +87,151 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
         return mcp::call_tool("get_image_metadata", json!({}));
     }
 
-    // Fast Path: Drawing
-    if lower_prompt.contains("draw") && lower_prompt.contains("line") {
-        // You mentioned macros work, so call them directly here
-        return macro_draw_line(50, 50, 200, 200); 
+    // Fast Path: Drawing a line ("draw/add/paint/make/create a line", "black line", etc.)
+    let wants_line = lower_prompt.contains("line")
+        && (lower_prompt.contains("draw")
+            || lower_prompt.contains("add")
+            || lower_prompt.contains("paint")
+            || lower_prompt.contains("create")
+            || lower_prompt.contains("make")
+            || lower_prompt.contains("black"));
+    if wants_line {
+        run_macro(macros::draw_line_across_image())?;
+        return Ok(json!({ "reply": "Done! Added a black line across the image.", "undoable": true, "plan": {}, "tool_results": [] }));
     }
 
-    // Fast Path: Basic Edits
-    if lower_prompt.contains("crop") && lower_prompt.contains("square") {
-        return macro_crop_square();
+    // Fast Path: Draw heart — extract colour from the prompt, default to pink
+    if lower_prompt.contains("heart") {
+        let color = if lower_prompt.contains("pink") { "pink" } else { extract_color(&lower_prompt) };
+        run_macro(macros::draw_heart(color))?;
+        return Ok(json!({ "reply": format!("Done! Added a {} heart to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Draw circle
+    if lower_prompt.contains("circle") {
+        let color = extract_color(&lower_prompt);
+        run_macro(macros::draw_circle(color))?;
+        return Ok(json!({ "reply": format!("Done! Added a {} circle to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Draw oval / ellipse
+    if lower_prompt.contains("oval") || lower_prompt.contains("ellipse") {
+        let color = extract_color(&lower_prompt);
+        run_macro(macros::draw_oval(color))?;
+        return Ok(json!({ "reply": format!("Done! Added a {} oval to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Draw triangle
+    if lower_prompt.contains("triangle") {
+        let color = extract_color(&lower_prompt);
+        run_macro(macros::draw_triangle(color))?;
+        return Ok(json!({ "reply": format!("Done! Added a {} triangle to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Draw filled rectangle (not a crop/resize operation)
+    let wants_draw_rect = (lower_prompt.contains("rectangle") || lower_prompt.contains("rect"))
+        && !lower_prompt.contains("crop")
+        && !lower_prompt.contains("resize");
+    if wants_draw_rect {
+        let color = extract_color(&lower_prompt);
+        run_macro(macros::draw_filled_rect(color))?;
+        return Ok(json!({ "reply": format!("Done! Added a {} rectangle to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Draw filled square-as-shape (contains "square" + draw verb, not crop/resize)
+    let wants_draw_square = lower_prompt.contains("square")
+        && (lower_prompt.contains("draw") || lower_prompt.contains("add") || lower_prompt.contains("paint"))
+        && !lower_prompt.contains("crop")
+        && !lower_prompt.contains("resize");
+    if wants_draw_square {
+        let color = extract_color(&lower_prompt);
+        run_macro(macros::draw_filled_rect(color))?;
+        return Ok(json!({ "reply": format!("Done! Added a {} square to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Increase brightness
+    let wants_brighter = lower_prompt.contains("bright")
+        && (lower_prompt.contains("increase")
+            || lower_prompt.contains("boost")
+            || lower_prompt.contains("more")
+            || lower_prompt.contains("brighter")
+            || lower_prompt.contains("raise")
+            || lower_prompt.contains("higher")
+            || lower_prompt.contains("up"));
+    if wants_brighter {
+        run_macro(macros::brightness_contrast(50.0, 0.0))?;
+        return Ok(json!({ "reply": "Done! Increased the brightness.", "undoable": false, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Decrease brightness / make darker
+    let wants_darker = (lower_prompt.contains("dark") || lower_prompt.contains("dim"))
+        && (lower_prompt.contains("more")
+            || lower_prompt.contains("darker")
+            || lower_prompt.contains("decrease")
+            || lower_prompt.contains("less")
+            || lower_prompt.contains("lower")
+            || lower_prompt.contains("reduce"));
+    let wants_brightness_decrease = lower_prompt.contains("bright")
+        && (lower_prompt.contains("decrease")
+            || lower_prompt.contains("reduce")
+            || lower_prompt.contains("less")
+            || lower_prompt.contains("lower")
+            || lower_prompt.contains("down"));
+    if wants_darker || wants_brightness_decrease {
+        run_macro(macros::brightness_contrast(-50.0, 0.0))?;
+        return Ok(json!({ "reply": "Done! Decreased the brightness.", "undoable": false, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Increase contrast
+    let wants_more_contrast = lower_prompt.contains("contrast")
+        && (lower_prompt.contains("increase")
+            || lower_prompt.contains("more")
+            || lower_prompt.contains("boost")
+            || lower_prompt.contains("higher")
+            || lower_prompt.contains("up"));
+    if wants_more_contrast {
+        run_macro(macros::brightness_contrast(0.0, 50.0))?;
+        return Ok(json!({ "reply": "Done! Increased the contrast.", "undoable": false, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Decrease contrast
+    let wants_less_contrast = lower_prompt.contains("contrast")
+        && (lower_prompt.contains("decrease")
+            || lower_prompt.contains("less")
+            || lower_prompt.contains("reduce")
+            || lower_prompt.contains("lower")
+            || lower_prompt.contains("down"));
+    if wants_less_contrast {
+        run_macro(macros::brightness_contrast(0.0, -50.0))?;
+        return Ok(json!({ "reply": "Done! Decreased the contrast.", "undoable": false, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Blur
+    let wants_blur = lower_prompt.contains("blur")
+        && !lower_prompt.contains("unblur")
+        && !lower_prompt.contains("remove blur")
+        && !lower_prompt.contains("sharpen");
+    if wants_blur {
+        run_macro(macros::blur(10.0))?;
+        return Ok(json!({ "reply": "Done! Applied a blur to the image.", "undoable": false, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Undo
+    if lower_prompt == "undo" || lower_prompt.starts_with("undo ") || lower_prompt == "undo last" {
+        run_macro(macros::undo())?;
+        return Ok(json!({ "reply": "↩ Last change undone.", "undoable": false, "plan": {}, "tool_results": [] }));
+    }
+
+    // Fast Path: Square crop ("crop/resize/make to a square", etc.)
+    let wants_square_crop = lower_prompt.contains("square")
+        && (lower_prompt.contains("crop")
+            || lower_prompt.contains("resize")
+            || lower_prompt.contains("make")
+            || lower_prompt.contains("to a")
+            || lower_prompt.contains("into a"));
+    if wants_square_crop {
+        macro_crop_square()?;
+        return Ok(json!({ "reply": "Done! Cropped the image to a square.", "undoable": true, "plan": {}, "tool_results": [] }));
     }
     // STEP 1: Tool selection, small prompt for Ollama
     let selector_prompt = format!(
@@ -97,12 +261,11 @@ User request: {user}
 
     let selection_raw = llm_client::chat(&selector_prompt).await?;
 
-    // Strip anything before the first '{' to handle "Here is the response: { ... }"
-    let selection_str = if let Some(idx) = selection_raw.find('{') {
-        &selection_raw[idx..]
-    } else {
-        selection_raw.as_str()
-    };
+    // Strip prefix before first '{' and suffix after last '}' (handles markdown fences)
+    let sel_start = selection_raw.find('{').unwrap_or(0);
+    let sel_substr = &selection_raw[sel_start..];
+    let sel_end = sel_substr.rfind('}').map(|i| i + 1).unwrap_or(sel_substr.len());
+    let selection_str = &sel_substr[..sel_end];
 
     let selection: Value = serde_json::from_str(selection_str).map_err(|e| {
         format!(
@@ -151,7 +314,6 @@ You write Python console commands to control GIMP 3 via the PyGObject console.
 User request: {user}
 
 Respond ONLY with valid JSON in this format:
-
 {{
   "thought": "short explanation",
   "steps": [
@@ -162,12 +324,13 @@ Respond ONLY with valid JSON in this format:
         "args": [
           "pyGObject-console",
           [
+            "from gi.repository import Gimp, Gegl",
             "images = Gimp.get_images()",
             "image = images[0]",
             "layers = image.get_layers()",
             "layer = layers[0]",
             "drawable = layer",
-            "... extra commands you need ...",
+            "... your commands ...",
             "Gimp.displays_flush()"
           ]
         ],
@@ -177,36 +340,135 @@ Respond ONLY with valid JSON in this format:
   ]
 }}
 
-Rules:
-- The response MUST start with '{{' and contain only JSON.
-- Always use api_path: "exec".
-- Always use args[0]: "pyGObject-console".
-- args[1] must be a list of valid Python statements.
-- Always include these exact base lines at the top, unchanged:
+CRITICAL RULES — violating these causes Python syntax errors or runtime crashes:
+1. Each element of args[1] must be ONE simple Python statement (assignment or function call).
+2. NO multiline code, NO indented blocks, NO for-loops, NO if/else, NO try/except in the array.
+3. NEVER use f-strings (f"...") — they are invalid inside JSON strings.
+4. Use separate array elements to build up values step by step.
+5. ONLY use the exact methods listed in VALID GIMP 3 API below. Any other method WILL crash.
+6. NEVER add Python comments (# ...) anywhere in the output — they break JSON parsing.
+7. Output ONLY the JSON object. No prose before it, no notes after it, no backticks.
 
-  "images = Gimp.get_images()",
-  "image = images[0]",
-  "layers = image.get_layers()",
-  "layer = layers[0]",
-  "drawable = layer",
+FORBIDDEN — these methods DO NOT EXIST in GIMP 3, they will always crash:
+- Gimp.polygon()
+- Gimp.draw_polygon()
+- Gimp.draw_line()
+- Gimp.draw_circle()
+- Gimp.draw_ellipse()
+- Gimp.draw_rect()
+- Gimp.draw_rectangle()
+- Gimp.fill()
+- Gimp.rectangle()
+- Gimp.circle()
+- Gimp.ellipse()
+- Gimp.line()
+- image.draw_*()
+- Gimp.Image.draw_*()
+- layer.draw_*()
+- drawable.draw_*()
+- Gimp.text_*()  (text operations are not supported)
+- gimp_*() (old Script-Fu style, not available in GIMP 3)
+Do NOT use any method with "draw_" in the name except the ones explicitly listed below.
 
-- Never invent attributes or properties like image.active_image or image.layers.
-- To resize the whole image, use: image.scale(new_width, new_height)
-- To get the first layer, use: layers = image.get_layers(); layer = layers[0]
-- Always finish with a line: "Gimp.displays_flush()".
-- Only use the call_api tool in steps.
+VALID GIMP 3 API (use ONLY these exact method names):
+
+Set color:
+  "from gi.repository import Gimp, Gegl"
+  "color = Gegl.Color.new('pink')"
+  "Gimp.context_set_foreground(color)"
+  Color names: red, green, blue, black, white, pink, yellow, orange, purple, cyan, magenta
+
+Get image and layer:
+  "images = Gimp.get_images()"
+  "image = images[0]"
+  "layers = image.get_layers()"
+  "layer = layers[0]"
+  "drawable = layer"
+  "w = image.get_width()"
+  "h = image.get_height()"
+
+Scale image:
+  "image.scale(new_width, new_height)"
+
+Crop image:
+  "image.crop(new_width, new_height, offset_x, offset_y)"
+
+Draw a line (the ONLY way to draw lines):
+  "Gimp.pencil(drawable, [x1, y1, x2, y2])"
+
+Draw a filled ellipse or circle (select then fill — no direct draw method):
+  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
+  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
+  "Gimp.Selection.none(image)"
+
+Draw a filled rectangle (select then fill — no direct draw method):
+  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
+  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
+  "Gimp.Selection.none(image)"
+
+Combine shapes with ADD to selection:
+  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, x2, y2, w2, h2)"
+  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, x2, y2, w2, h2)"
+
+Brightness/contrast:
+  "Gimp.get_pdb().run_procedure('gimp-brightness-contrast', [Gimp.RunMode.NONINTERACTIVE, drawable, b, c])"
+
+Blur:
+  "Gimp.get_pdb().run_procedure('plug-in-gauss', [Gimp.RunMode.NONINTERACTIVE, image, drawable, radius, radius, 0])"
+
+Flush display (always include as last step):
+  "Gimp.displays_flush()"
+
+EXAMPLE — draw a pink heart in the center. Note the exact args structure: args[0] is always "pyGObject-console", args[1] is the array of Python lines.
+
+{{
+  "thought": "Draw a pink heart using two ellipses and a rectangle",
+  "steps": [
+    {{
+      "tool": "call_api",
+      "arguments": {{
+        "api_path": "exec",
+        "args": [
+          "pyGObject-console",
+          [
+            "from gi.repository import Gimp, Gegl",
+            "images = Gimp.get_images()",
+            "image = images[0]",
+            "layers = image.get_layers()",
+            "layer = layers[0]",
+            "drawable = layer",
+            "w = image.get_width()",
+            "h = image.get_height()",
+            "cx = w // 2",
+            "cy = h // 2",
+            "s = min(w, h) // 6",
+            "pink = Gegl.Color.new('pink')",
+            "Gimp.context_set_foreground(pink)",
+            "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, cx - s, cy - s, s, s)",
+            "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, cx, cy - s, s, s)",
+            "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s, cy, s * 2, s)",
+            "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)",
+            "Gimp.Selection.none(image)",
+            "Gimp.displays_flush()"
+          ]
+        ],
+        "kwargs": {{}}
+      }}
+    }}
+  ]
+}}
 "#,
             user = prompt
         );
 
         let plan_raw = llm_client::chat(&planning_prompt).await?;
 
-        // Strip any prefix before JSON
-        let plan_str = if let Some(idx) = plan_raw.find('{') {
-            &plan_raw[idx..]
-        } else {
-            plan_raw.as_str()
-        };
+        // Strip any prefix before first '{' and any suffix after last '}'
+        // (handles markdown fences like ```json ... ``` wrapping the output)
+        let json_start = plan_raw.find('{').unwrap_or(0);
+        let json_substr = &plan_raw[json_start..];
+        let json_end = json_substr.rfind('}').map(|i| i + 1).unwrap_or(json_substr.len());
+        let plan_str = &json_substr[..json_end];
 
         serde_json::from_str(plan_str).map_err(|e| {
             format!("Failed to parse plan JSON: {e}\nLLM output was: {plan_raw}")
@@ -428,119 +690,42 @@ Rules:
                     .or(text_msg)
                     .unwrap_or("Unknown error");
 
-                reply_text = format!(
-                    "I tried to call '{api}' but GIMP reported an error: {msg}",
-                    api = api_path,
-                );
-                continue;
-            }
+                // Extract the generated Python lines for debugging
+                let python_preview = arguments_val
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .and_then(|a| a.get(1))
+                    .and_then(|v| v.as_array())
+                    .map(|lines| {
+                        lines.iter()
+                            .filter_map(|l| l.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n  ")
+                    })
+                    .unwrap_or_default();
 
-            let after_meta_raw = mcp::call_tool("get_image_metadata", json!({}))
-                .unwrap_or_else(|err| json!({
-                    "isError": true,
-                    "content": [
-                        { "text": format!("Failed to fetch image metadata after edit: {err}"), "type": "text" }
-                    ]
-                }));
-
-            println!("DEBUG: after_meta_raw: {:#?}", after_meta_raw);
-
-            let after_is_error = after_meta_raw
-                .get("isError")
-                .and_then(|e| e.as_bool())
-                .unwrap_or(false);
-
-            let after_text_opt = after_meta_raw
-                .get("content")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|first| first.get("text"))
-                .and_then(|t| t.as_str());
-
-            if after_is_error {
-                reply_text = format!(
-                    "I called '{api}', but I could not read the updated image metadata. Please check GIMP to see the result.",
-                    api = api_path
-                );
-                continue;
-            }
-
-            if let Some(after_text_json) = after_text_opt {
-                if let Ok(meta) = serde_json::from_str::<Value>(after_text_json) {
-                    let basic = meta.get("basic").unwrap_or(&Value::Null);
-                    let file = meta.get("file").unwrap_or(&Value::Null);
-
-                    let width = basic
-                        .get("width")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    let height = basic
-                        .get("height")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    let base_type = basic
-                        .get("base_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown");
-                    let basename = file
-                        .get("basename")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown image");
-
-                    if api_path.contains("scale") || api_path == "exec" {
-                        reply_text = format!(
-                            "I called '{api}' on the current image. After that, \"{name}\" is now {w}×{h} pixels with base type {base}.",
-                            api = api_path,
-                            name = basename,
-                            w = width,
-                            h = height,
-                            base = base_type,
-                        );
-                    } else if api_path.contains("crop") {
-                        reply_text = format!(
-                            "I called '{api}' to crop the image. It is now {w}×{h} pixels (\"{name}\", base type {base}).",
-                            api = api_path,
-                            name = basename,
-                            w = width,
-                            h = height,
-                            base = base_type,
-                        );
-                    } else {
-                        reply_text = format!(
-                            "I called '{api}' on the image. It is currently {w}×{h} pixels (\"{name}\", base type {base}).",
-                            api = api_path,
-                            name = basename,
-                            w = width,
-                            h = height,
-                            base = base_type,
-                        );
-                    }
+                reply_text = if python_preview.is_empty() {
+                    format!("GIMP returned an error: {msg}")
                 } else {
-                    reply_text = if api_path.is_empty() {
-                        "I performed an edit using call_api, but could not parse the updated metadata.".to_string()
-                    } else {
-                        format!(
-                            "I performed an edit using '{api}', but could not parse the updated metadata.",
-                            api = api_path
-                        )
-                    };
-                }
-            } else {
-                reply_text = if api_path.is_empty() {
-                    "I performed an edit using call_api, but there was no metadata response."
-                        .to_string()
-                } else {
-                    format!(
-                        "I performed an edit using '{api}', but there was no metadata response.",
-                        api = api_path
-                    )
+                    format!("GIMP returned an error: {msg}\n\nGenerated Python:\n  {python_preview}")
                 };
+                continue;
             }
+
+            // Edit succeeded — simple confirmation, no metadata roundtrip needed
+            reply_text = "Done! Changes applied to the image.".to_string();
         }
     }
 
+    // Mark as undoable if the final reply is a successful edit (not an error / info query)
+    let undoable = !reply_text.starts_with("GIMP returned an error")
+        && !reply_text.starts_with("I could not")
+        && !reply_text.starts_with("You are using")
+        && !reply_text.starts_with("Your current image");
+
     Ok(json!({
         "reply": reply_text,
+        "undoable": undoable,
         "plan": plan,
         "tool_results": tool_results
     }))
@@ -695,7 +880,22 @@ fn macro_blur(radius: f64) -> Result<serde_json::Value, String> {
     mcp::call_tool(tool_name, arguments)
 }
 
+#[tauri::command]
+fn macro_undo() -> Result<serde_json::Value, String> {
+    let payload = macros::undo();
 
+    let tool_name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Macro payload missing 'name'".to_string())?;
+
+    let arguments = payload
+        .get("arguments")
+        .cloned()
+        .ok_or_else(|| "Macro payload missing 'arguments'".to_string())?;
+
+    mcp::call_tool(tool_name, arguments)
+}
 
 
 pub fn run() {
@@ -706,12 +906,13 @@ pub fn run() {
             mcp_call_tool,
             assistant_request,
             health_check,
-            test_basic_mcp, 
-            macro_draw_line, 
-            macro_crop_square, 
+            test_basic_mcp,
+            macro_draw_line,
+            macro_crop_square,
             macro_resize,
-            macro_brightness_contrast, 
-            macro_blur, 
+            macro_brightness_contrast,
+            macro_blur,
+            macro_undo,
             commands::run_action_plan,
 
         ])

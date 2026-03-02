@@ -20,27 +20,109 @@ fn call_api_exec(python_lines: Vec<String>) -> Value {
     })
 }
 
+/// Save the current layer content to GIMP's clipboard so it can be restored by undo().
+/// Call this BEFORE making any changes.
+fn save_clipboard_lines() -> Vec<String> {
+    vec![
+        // If there is no active selection, Gimp.edit_copy copies the whole drawable.
+        "Gimp.edit_copy([layer])".to_string(),
+    ]
+}
+
+/// Draw a line between specific coordinates using Gimp.pencil (GIMP 3).
 pub fn draw_line(x1: i32, y1: i32, x2: i32, y2: i32) -> Value {
     let mut python_lines = vec![
         "from gi.repository import Gimp, Gegl".to_string(),
         "image = Gimp.get_images()[0]".to_string(),
-        "img_width = image.get_width()".to_string(),
-        "img_height = image.get_height()".to_string(),
         "layer = image.get_layers()[0]".to_string(),
         "drawable = layer".to_string(),
+    ];
+    python_lines.extend(save_clipboard_lines());
+    python_lines.extend(vec![
         "layer.add_alpha() if not layer.has_alpha() else None".to_string(),
         "black = Gegl.Color.new('black')".to_string(),
         "Gimp.context_set_foreground(black)".to_string(),
-    ];
-    
-    // We need to generate points but we don't know image size yet
-    // Solution: Create a Python one-liner that does everything
-    python_lines.push("exec('x1,y1,x2,y2=0,0,img_width-1,img_height-1;dx,dy=abs(x2-x1),abs(y2-y1);steps=max(dx,dy);[image.select_rectangle(Gimp.ChannelOps.ADD,int(x1+i*(x2-x1)/steps),int(y1+i*(y2-y1)/steps),5,5) for i in range(steps+1)]')".to_string());
-    
-    python_lines.push("drawable.edit_fill(Gimp.FillType.FOREGROUND)".to_string());
-    python_lines.push("Gimp.Selection.none(image)".to_string());
-    python_lines.push("Gimp.displays_flush()".to_string());
+        format!("Gimp.pencil(drawable, [{}, {}, {}, {}])", x1, y1, x2, y2),
+        "Gimp.displays_flush()".to_string(),
+    ]);
+    call_api_exec(python_lines)
+}
 
+/// Draw a black line from corner to corner across the entire image.
+pub fn draw_line_across_image() -> Value {
+    let mut python_lines = vec![
+        "from gi.repository import Gimp, Gegl".to_string(),
+        "image = Gimp.get_images()[0]".to_string(),
+        "w = image.get_width()".to_string(),
+        "h = image.get_height()".to_string(),
+        "layer = image.get_layers()[0]".to_string(),
+        "drawable = layer".to_string(),
+    ];
+    python_lines.extend(save_clipboard_lines());
+    python_lines.extend(vec![
+        "layer.add_alpha() if not layer.has_alpha() else None".to_string(),
+        "black = Gegl.Color.new('black')".to_string(),
+        "Gimp.context_set_foreground(black)".to_string(),
+        "Gimp.pencil(drawable, [0, 0, w - 1, h - 1])".to_string(),
+        "Gimp.displays_flush()".to_string(),
+    ]);
+    call_api_exec(python_lines)
+}
+
+/// Draw a filled heart shape in the centre of the image.
+/// `color` is a CSS color name (red, pink, blue…) or rgb(r,g,b).
+pub fn draw_heart(color: &str) -> Value {
+    let mut python_lines = vec![
+        "from gi.repository import Gimp, Gegl".to_string(),
+        "image = Gimp.get_images()[0]".to_string(),
+        "w = image.get_width()".to_string(),
+        "h = image.get_height()".to_string(),
+        "layer = image.get_layers()[0]".to_string(),
+        "drawable = layer".to_string(),
+    ];
+    python_lines.extend(save_clipboard_lines());
+    python_lines.extend(vec![
+        format!("fill_color = Gegl.Color.new('{}')", color),
+        "Gimp.context_set_foreground(fill_color)".to_string(),
+        "cx = w // 2".to_string(),
+        "cy = h // 2".to_string(),
+        "s = min(w, h) // 5".to_string(),
+        // Two circles for the top bumps
+        "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, cx - s, cy - s, s, s)".to_string(),
+        "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, cx, cy - s, s, s)".to_string(),
+        // Rectangle fills the middle body
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s, cy, s * 2, s)".to_string(),
+        // Staircase rows tapering to a point at the bottom
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s * 3 // 4, cy + s, s * 3 // 2, s // 3)".to_string(),
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s // 2, cy + s + s // 3, s, s // 3)".to_string(),
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s // 4, cy + s + s * 2 // 3, s // 2, s // 3)".to_string(),
+        "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)".to_string(),
+        "Gimp.Selection.none(image)".to_string(),
+        "Gimp.displays_flush()".to_string(),
+    ]);
+    call_api_exec(python_lines)
+}
+
+/// Undo the last drawing change.
+///
+/// This does NOT use GIMP's built-in undo stack (which doesn't work from within
+/// a long-running plugin). Instead it restores the clipboard content that was
+/// saved by each draw macro before making changes.
+pub fn undo() -> Value {
+    let python_lines = vec![
+        "from gi.repository import Gimp".to_string(),
+        "image = Gimp.get_images()[0]".to_string(),
+        "w = image.get_width()".to_string(),
+        "h = image.get_height()".to_string(),
+        "layer = image.get_layers()[0]".to_string(),
+        // Select the full layer so the paste covers everything
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.REPLACE, 0, 0, w, h)".to_string(),
+        // Paste the saved state back (paste_into=True to replace the selection area)
+        "floating_sel = Gimp.edit_paste(layer, True)[0]".to_string(),
+        "Gimp.floating_sel_anchor(floating_sel)".to_string(),
+        "Gimp.Selection.none(image)".to_string(),
+        "Gimp.displays_flush()".to_string(),
+    ];
     call_api_exec(python_lines)
 }
 
@@ -53,12 +135,10 @@ pub fn crop_to_square() -> Value {
         "size = min(w, h)".to_string(),
         "x_offset = (w - size) // 2".to_string(),
         "y_offset = (h - size) // 2".to_string(),
-        
         // FIXED: Correct GIMP 3 parameter order (new_width, new_height, offx, offy)
         "image.crop(size, size, x_offset, y_offset)".to_string(),
         "Gimp.displays_flush()".to_string(),
     ];
-
     call_api_exec(python_lines)
 }
 
@@ -75,38 +155,154 @@ pub fn resize_width(width: i32) -> Value {
         "image.scale(new_w, new_h)".to_string(),
         "Gimp.displays_flush()".to_string(),
     ];
-
     call_api_exec(python_lines)
 }
 
 pub fn brightness_contrast(brightness: f64, contrast: f64) -> Value {
-    let brightness = clamp_f64(brightness, -100.0, 100.0);
-    let contrast = clamp_f64(contrast, -100.0, 100.0);
+    // In GIMP 3, brightness_contrast takes floats in -1.0..1.0 (not -127..127).
+    // Callers pass values in -127..127 range, so we normalise here.
+    let b = clamp_f64(brightness / 127.0, -1.0, 1.0);
+    let c = clamp_f64(contrast   / 127.0, -1.0, 1.0);
     let python_lines = vec![
         "from gi.repository import Gimp".to_string(),
         "image = Gimp.get_images()[0]".to_string(),
         "layer = image.get_layers()[0]".to_string(),
         "drawable = layer".to_string(),
-
-        // Use GIMP 3 brightness-contrast
-        format!("Gimp.get_pdb().run_procedure('gimp-brightness-contrast', [Gimp.RunMode.NONINTERACTIVE, drawable, {}, {}])", brightness / 100.0, contrast / 100.0),
+        format!("drawable.brightness_contrast({:.4}, {:.4})", b, c),
         "Gimp.displays_flush()".to_string(),
     ];
-
     call_api_exec(python_lines)
 }
 
 pub fn blur(radius: f64) -> Value {
+    // In GIMP 3, plug-in-gauss is gone. Use DrawableFilter with gegl:gaussian-blur,
+    // then merge it so the change is destructive (baked into the layer).
+    let std_dev = (radius / 3.0).max(1.0); // convert radius to std-dev approx
     let python_lines = vec![
         "from gi.repository import Gimp".to_string(),
         "image = Gimp.get_images()[0]".to_string(),
         "layer = image.get_layers()[0]".to_string(),
         "drawable = layer".to_string(),
-
-        // Use plug-in-gauss for blur
-        format!("Gimp.get_pdb().run_procedure('plug-in-gauss', [Gimp.RunMode.NONINTERACTIVE, image, drawable, {}, {}, 0])", radius, radius),
+        format!("_f = Gimp.DrawableFilter.new(drawable, 'gegl:gaussian-blur', 'blur')"),
+        format!("_f.get_config().set_property('std-dev-x', {:.1})", std_dev),
+        format!("_f.get_config().set_property('std-dev-y', {:.1})", std_dev),
+        "_f.set_opacity(1.0)".to_string(),
+        "drawable.append_filter(_f)".to_string(),
+        "drawable.merge_filters()".to_string(),
         "Gimp.displays_flush()".to_string(),
     ];
+    call_api_exec(python_lines)
+}
 
+/// Draw a filled circle centred in the image.
+/// `color` is a CSS colour name (red, blue, green, …) or rgb(r,g,b).
+pub fn draw_circle(color: &str) -> Value {
+    let mut python_lines = vec![
+        "from gi.repository import Gimp, Gegl".to_string(),
+        "image = Gimp.get_images()[0]".to_string(),
+        "w = image.get_width()".to_string(),
+        "h = image.get_height()".to_string(),
+        "layer = image.get_layers()[0]".to_string(),
+        "drawable = layer".to_string(),
+    ];
+    python_lines.extend(save_clipboard_lines());
+    python_lines.extend(vec![
+        format!("fill_color = Gegl.Color.new('{}')", color),
+        "Gimp.context_set_foreground(fill_color)".to_string(),
+        "r = min(w, h) // 3".to_string(),
+        "cx = w // 2".to_string(),
+        "cy = h // 2".to_string(),
+        "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, cx - r, cy - r, r * 2, r * 2)".to_string(),
+        "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)".to_string(),
+        "Gimp.Selection.none(image)".to_string(),
+        "Gimp.displays_flush()".to_string(),
+    ]);
+    call_api_exec(python_lines)
+}
+
+/// Draw a filled oval/ellipse centred in the image (wider than tall).
+/// `color` is a CSS colour name or rgb(r,g,b).
+pub fn draw_oval(color: &str) -> Value {
+    let mut python_lines = vec![
+        "from gi.repository import Gimp, Gegl".to_string(),
+        "image = Gimp.get_images()[0]".to_string(),
+        "w = image.get_width()".to_string(),
+        "h = image.get_height()".to_string(),
+        "layer = image.get_layers()[0]".to_string(),
+        "drawable = layer".to_string(),
+    ];
+    python_lines.extend(save_clipboard_lines());
+    python_lines.extend(vec![
+        format!("fill_color = Gegl.Color.new('{}')", color),
+        "Gimp.context_set_foreground(fill_color)".to_string(),
+        "ew = w * 2 // 3".to_string(),
+        "eh = h // 3".to_string(),
+        "ex = (w - ew) // 2".to_string(),
+        "ey = (h - eh) // 2".to_string(),
+        "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, ex, ey, ew, eh)".to_string(),
+        "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)".to_string(),
+        "Gimp.Selection.none(image)".to_string(),
+        "Gimp.displays_flush()".to_string(),
+    ]);
+    call_api_exec(python_lines)
+}
+
+/// Draw a filled triangle (staircase approximation) pointing upward in the centre.
+/// `color` is a CSS colour name or rgb(r,g,b).
+pub fn draw_triangle(color: &str) -> Value {
+    let mut python_lines = vec![
+        "from gi.repository import Gimp, Gegl".to_string(),
+        "image = Gimp.get_images()[0]".to_string(),
+        "w = image.get_width()".to_string(),
+        "h = image.get_height()".to_string(),
+        "layer = image.get_layers()[0]".to_string(),
+        "drawable = layer".to_string(),
+    ];
+    python_lines.extend(save_clipboard_lines());
+    python_lines.extend(vec![
+        format!("fill_color = Gegl.Color.new('{}')", color),
+        "Gimp.context_set_foreground(fill_color)".to_string(),
+        "cx = w // 2".to_string(),
+        "s = min(w, h) // 3".to_string(),
+        "ty = h // 2 - s".to_string(),
+        "rs = s // 3".to_string(),
+        // Six staircase rows, narrowest at top, widest at bottom
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.REPLACE, cx - s // 6, ty, s // 3, rs)".to_string(),
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s // 3, ty + rs, s * 2 // 3, rs)".to_string(),
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s // 2, ty + rs * 2, s, rs)".to_string(),
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s * 2 // 3, ty + rs * 3, s * 4 // 3, rs)".to_string(),
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s * 5 // 6, ty + rs * 4, s * 5 // 3, rs)".to_string(),
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s, ty + rs * 5, s * 2, rs)".to_string(),
+        "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)".to_string(),
+        "Gimp.Selection.none(image)".to_string(),
+        "Gimp.displays_flush()".to_string(),
+    ]);
+    call_api_exec(python_lines)
+}
+
+/// Draw a filled rectangle (half the image size) centred in the image.
+/// `color` is a CSS colour name or rgb(r,g,b).
+pub fn draw_filled_rect(color: &str) -> Value {
+    let mut python_lines = vec![
+        "from gi.repository import Gimp, Gegl".to_string(),
+        "image = Gimp.get_images()[0]".to_string(),
+        "w = image.get_width()".to_string(),
+        "h = image.get_height()".to_string(),
+        "layer = image.get_layers()[0]".to_string(),
+        "drawable = layer".to_string(),
+    ];
+    python_lines.extend(save_clipboard_lines());
+    python_lines.extend(vec![
+        format!("fill_color = Gegl.Color.new('{}')", color),
+        "Gimp.context_set_foreground(fill_color)".to_string(),
+        "rw = w // 2".to_string(),
+        "rh = h // 2".to_string(),
+        "rx = w // 4".to_string(),
+        "ry = h // 4".to_string(),
+        "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.REPLACE, rx, ry, rw, rh)".to_string(),
+        "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)".to_string(),
+        "Gimp.Selection.none(image)".to_string(),
+        "Gimp.displays_flush()".to_string(),
+    ]);
     call_api_exec(python_lines)
 }

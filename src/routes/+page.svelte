@@ -4,6 +4,7 @@
 
   type AssistantResponse = {
     reply: string;
+    undoable?: boolean;
     plan: any;
     tool_results: any[];
   };
@@ -11,6 +12,7 @@
   type Message = {
     role: "user" | "assistant";
     text: string;
+    undoable?: boolean;
   };
 
   let messages: Message[] = [
@@ -104,13 +106,22 @@
 
     try {
       const result = await invoke<AssistantResponse>("assistant_request", { prompt: trimmed });
-      messages = [...messages, { role: "assistant", text: result.reply || "Done." }];
+      messages = [...messages, { role: "assistant", text: result.reply || "Done.", undoable: result.undoable ?? false }];
       isConnected = true;
     } catch (e) {
       messages = [...messages, { role: "assistant", text: "Error: " + String(e) }];
       isConnected = false;
     } finally {
       isSending = false;
+    }
+  }
+
+  async function undoLast() {
+    try {
+      await invoke("macro_undo");
+      messages = [...messages, { role: "assistant", text: "↩ Last change undone." }];
+    } catch (e) {
+      messages = [...messages, { role: "assistant", text: "Undo failed: " + String(e) }];
     }
   }
 
@@ -143,6 +154,9 @@
         {#each messages as msg}
           <div class="message {msg.role}">
             <div class="message-content">{msg.text}</div>
+            {#if msg.undoable}
+              <button class="undo-btn" on:click={undoLast}>↩ Undo</button>
+            {/if}
           </div>
         {/each}
       </div>
@@ -215,6 +229,8 @@
   .dev-button { margin-top: 5px; cursor: pointer; }
   .button-grid { display: flex; gap: 5px; flex-wrap: wrap; }
   pre { font-size: 10px; background: #eee; padding: 5px; border-radius: 5px; }
+  .undo-btn { display: block; margin-top: 6px; font-size: 11px; background: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.4); border-radius: 8px; padding: 3px 10px; cursor: pointer; color: inherit; }
+  .undo-btn:hover { background: rgba(255,255,255,0.45); }
   .status-dot { width: 10px; height: 10px; border-radius: 50%; background: red; display: inline-block; }
   .status-dot.connected { background: green; }
 </style>

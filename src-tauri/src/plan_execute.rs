@@ -53,8 +53,13 @@ pub fn execute_plan(plan: ActionPlan) -> Result<Vec<StepResult>, String> {
             }
 
             ValidatedParams::Undo { steps } => {
-                // If you don't have undo yet, return a clear error:
-                Err(format!("Undo not implemented yet (requested steps={steps})"))
+                let mut result: Result<Value, String> = Ok(Value::Null);
+                for _ in 0..steps {
+                    let payload = crate::macros::undo();
+                    result = run_payload(payload);
+                    if result.is_err() { break; }
+                }
+                result
             }
 
             ValidatedParams::Redo { steps } => {

@@ -41,9 +41,12 @@ Parameter requirements:
 - resize_width params: {{ "width": integer }}
 - crop_square params: {{ }}
 - draw_line params: {{ "x1": int, "y1": int, "x2": int, "y2": int }}
+  If no coordinates are given, use defaults: {{ "x1": 0, "y1": 0, "x2": 200, "y2": 200 }}
+  "add a line", "paint a line", "insert a line", "make a line", "black line" all map to draw_line.
 - undo/redo params: {{ "steps": int }} (default 1 if omitted)
 
 If the user is vague (e.g. "make it nicer"), return a plan with ZERO steps and a summary asking ONE clarification question.
+If the user requests any kind of line (regardless of color or phrasing), always use draw_line — never treat a line request as vague.
 
 User request:
 {user}

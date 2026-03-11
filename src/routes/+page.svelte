@@ -4,6 +4,7 @@
 
   type AssistantResponse = {
     reply: string;
+    explain?: string;
     undoable?: boolean;
     plan: any;
     tool_results: any[];
@@ -12,6 +13,7 @@
   type Message = {
     role: "user" | "assistant";
     text: string;
+    explain?: string;
     undoable?: boolean;
   };
 
@@ -106,7 +108,7 @@
 
     try {
       const result = await invoke<AssistantResponse>("assistant_request", { prompt: trimmed });
-      messages = [...messages, { role: "assistant", text: result.reply || "Done.", undoable: result.undoable ?? false }];
+      messages = [...messages, { role: "assistant", text: result.reply || "Done.", explain: result.explain, undoable: result.undoable ?? false }];
       isConnected = true;
     } catch (e) {
       messages = [...messages, { role: "assistant", text: "Error: " + String(e) }];
@@ -154,6 +156,12 @@
         {#each messages as msg}
           <div class="message {msg.role}">
             <div class="message-content">{msg.text}</div>
+            {#if msg.explain}
+              <div class="explain-box">
+                <span class="explain-icon">💡</span>
+                <p class="explain-text">{msg.explain}</p>
+              </div>
+            {/if}
             {#if msg.undoable}
               <button class="undo-btn" on:click={undoLast}>↩ Undo</button>
             {/if}
@@ -231,6 +239,9 @@
   pre { font-size: 10px; background: #eee; padding: 5px; border-radius: 5px; }
   .undo-btn { display: block; margin-top: 6px; font-size: 11px; background: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.4); border-radius: 8px; padding: 3px 10px; cursor: pointer; color: inherit; }
   .undo-btn:hover { background: rgba(255,255,255,0.45); }
+  .explain-box { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; background: #fffbea; border-left: 3px solid #f5c842; border-radius: 6px; padding: 8px 10px; }
+  .explain-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+  .explain-text { margin: 0; font-size: 12px; color: #5a4a00; line-height: 1.5; }
   .status-dot { width: 10px; height: 10px; border-radius: 50%; background: red; display: inline-block; }
   .status-dot.connected { background: green; }
 </style>

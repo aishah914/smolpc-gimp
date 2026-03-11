@@ -50,23 +50,42 @@ fn mcp_call_tool(name: String, arguments: Value) -> Result<Value, String> {
     mcp::call_tool(&name, arguments)
 }
 
-/// Extract a CSS colour name from a lowercase prompt string.
+/// Extract a GEGL-safe colour value from a lowercase prompt string.
+/// Some CSS colour names (pink, orange, cyan, magenta, brown) are not recognised
+/// by GEGL in this version and return garbage values — use hex instead.
 /// Defaults to "blue" if no recognised colour is found.
 fn extract_color(lower: &str) -> &'static str {
     if lower.contains("red")     { "red" }
     else if lower.contains("blue")    { "blue" }
     else if lower.contains("green")   { "green" }
     else if lower.contains("yellow")  { "yellow" }
-    else if lower.contains("orange")  { "orange" }
+    else if lower.contains("orange")  { "#FFA500" }   // "orange" broken in GEGL
     else if lower.contains("purple")  { "purple" }
-    else if lower.contains("pink")    { "pink" }
-    else if lower.contains("cyan")    { "cyan" }
-    else if lower.contains("magenta") { "magenta" }
-    else if lower.contains("brown")   { "brown" }
+    else if lower.contains("pink")    { "#FF69B4" }   // "pink" broken in GEGL
+    else if lower.contains("cyan")    { "#00FFFF" }   // "cyan" returns wrong alpha
+    else if lower.contains("magenta") { "#FF00FF" }   // "magenta" broken in GEGL
+    else if lower.contains("brown")   { "#8B4513" }   // "brown" broken in GEGL
     else if lower.contains("grey") || lower.contains("gray") { "gray" }
     else if lower.contains("black")   { "black" }
     else if lower.contains("white")   { "white" }
     else { "blue" }
+}
+
+/// Detect a spatial region ("top", "bottom", "left", "right") in a lowercase prompt.
+/// Requires one of: "half", "side", "part", "section", "portion", "area".
+fn extract_region(lower: &str) -> Option<&'static str> {
+    let has_scope = lower.contains("half")
+        || lower.contains("side")
+        || lower.contains("part")
+        || lower.contains("section")
+        || lower.contains("portion")
+        || lower.contains("area");
+    if !has_scope { return None; }
+    if lower.contains("top")    { Some("top") }
+    else if lower.contains("bottom") { Some("bottom") }
+    else if lower.contains("left")   { Some("left") }
+    else if lower.contains("right")  { Some("right") }
+    else { None }
 }
 
 /// Call an MCP tool from a macro payload `{ "name": "...", "arguments": {...} }`.
@@ -97,35 +116,55 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
             || lower_prompt.contains("black"));
     if wants_line {
         run_macro(macros::draw_line_across_image())?;
-        return Ok(json!({ "reply": "Done! Added a black line across the image.", "undoable": true, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": "Done! Added a black line across the image.",
+            "explain": "To do this yourself in GIMP: pick the Pencil tool (press N). Hold Shift and click two points on the canvas — GIMP draws a straight line between them.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Draw heart — extract colour from the prompt, default to pink
     if lower_prompt.contains("heart") {
-        let color = if lower_prompt.contains("pink") { "pink" } else { extract_color(&lower_prompt) };
+        let color = extract_color(&lower_prompt);
         run_macro(macros::draw_heart(color))?;
-        return Ok(json!({ "reply": format!("Done! Added a {} heart to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": format!("Done! Added a {} heart to the image.", color),
+            "explain": "To do this yourself in GIMP: use the Ellipse Select tool (press E) to draw two overlapping circles for the bumps, then the Rectangle Select tool (press R) for the body. Fill each selection with Edit → Fill with Foreground Color. Press Shift+Ctrl+A to deselect when done.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Draw circle
     if lower_prompt.contains("circle") {
         let color = extract_color(&lower_prompt);
         run_macro(macros::draw_circle(color))?;
-        return Ok(json!({ "reply": format!("Done! Added a {} circle to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": format!("Done! Added a {} circle to the image.", color),
+            "explain": "To do this yourself in GIMP: choose the Ellipse Select tool (press E). Hold Shift while dragging to make a perfect circle. Then go to Edit → Fill with Foreground Color. Press Shift+Ctrl+A to deselect.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Draw oval / ellipse
     if lower_prompt.contains("oval") || lower_prompt.contains("ellipse") {
         let color = extract_color(&lower_prompt);
         run_macro(macros::draw_oval(color))?;
-        return Ok(json!({ "reply": format!("Done! Added a {} oval to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": format!("Done! Added a {} oval to the image.", color),
+            "explain": "To do this yourself in GIMP: choose the Ellipse Select tool (press E) and drag to draw an oval shape. Then go to Edit → Fill with Foreground Color. Press Shift+Ctrl+A to deselect.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Draw triangle
     if lower_prompt.contains("triangle") {
         let color = extract_color(&lower_prompt);
         run_macro(macros::draw_triangle(color))?;
-        return Ok(json!({ "reply": format!("Done! Added a {} triangle to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": format!("Done! Added a {} triangle to the image.", color),
+            "explain": "To do this yourself in GIMP: use the Free Select tool (press F) and click three points to draw a triangle outline. Then fill it with Edit → Fill with Foreground Color.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Draw filled rectangle (not a crop/resize operation)
@@ -135,7 +174,11 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
     if wants_draw_rect {
         let color = extract_color(&lower_prompt);
         run_macro(macros::draw_filled_rect(color))?;
-        return Ok(json!({ "reply": format!("Done! Added a {} rectangle to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": format!("Done! Added a {} rectangle to the image.", color),
+            "explain": "To do this yourself in GIMP: choose the Rectangle Select tool (press R) and drag to draw a rectangle. Then go to Edit → Fill with Foreground Color. Press Shift+Ctrl+A to deselect.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Draw filled square-as-shape (contains "square" + draw verb, not crop/resize)
@@ -146,7 +189,79 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
     if wants_draw_square {
         let color = extract_color(&lower_prompt);
         run_macro(macros::draw_filled_rect(color))?;
-        return Ok(json!({ "reply": format!("Done! Added a {} square to the image.", color), "undoable": true, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": format!("Done! Added a {} square to the image.", color),
+            "explain": "To do this yourself in GIMP: choose the Rectangle Select tool (press R), hold Shift while dragging to make a perfect square. Then go to Edit → Fill with Foreground Color. Press Shift+Ctrl+A to deselect.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
+    }
+
+    // Fast Path: Selection-aware operations (e.g. "blur the top half", "brighten the bottom half")
+    if let Some(region) = extract_region(&lower_prompt) {
+        let region_label = match region {
+            "top"    => "top half",
+            "bottom" => "bottom half",
+            "left"   => "left half",
+            "right"  => "right half",
+            _        => region,
+        };
+        let wants_brighter_region = lower_prompt.contains("bright")
+            && (lower_prompt.contains("increase") || lower_prompt.contains("boost")
+                || lower_prompt.contains("more") || lower_prompt.contains("brighter")
+                || lower_prompt.contains("raise") || lower_prompt.contains("up"));
+        let wants_darker_region = (lower_prompt.contains("dark") || lower_prompt.contains("dim"))
+            && (lower_prompt.contains("more") || lower_prompt.contains("darker")
+                || lower_prompt.contains("decrease") || lower_prompt.contains("less")
+                || lower_prompt.contains("lower") || lower_prompt.contains("reduce"));
+        let wants_more_contrast_region = lower_prompt.contains("contrast")
+            && (lower_prompt.contains("increase") || lower_prompt.contains("more")
+                || lower_prompt.contains("boost") || lower_prompt.contains("up"));
+        let wants_less_contrast_region = lower_prompt.contains("contrast")
+            && (lower_prompt.contains("decrease") || lower_prompt.contains("less")
+                || lower_prompt.contains("reduce") || lower_prompt.contains("down"));
+        let wants_blur_region = lower_prompt.contains("blur")
+            && !lower_prompt.contains("unblur") && !lower_prompt.contains("sharpen");
+
+        if wants_brighter_region {
+            run_macro(macros::brightness_contrast_region(70.0, 0.0, region))?;
+            return Ok(json!({
+                "reply": format!("Done! Brightened the {}.", region_label),
+                "explain": format!("To do this yourself in GIMP: choose the Rectangle Select tool (press R) and drag to select the {} of the image. Then go to Colors → Brightness-Contrast and drag the Brightness slider to the right. Click OK, then press Shift+Ctrl+A to deselect.", region_label),
+                "undoable": true, "plan": {}, "tool_results": []
+            }));
+        }
+        if wants_darker_region {
+            run_macro(macros::brightness_contrast_region(-70.0, 0.0, region))?;
+            return Ok(json!({
+                "reply": format!("Done! Darkened the {}.", region_label),
+                "explain": format!("To do this yourself in GIMP: choose the Rectangle Select tool (press R) and drag to select the {} of the image. Then go to Colors → Brightness-Contrast and drag the Brightness slider to the left. Click OK, then press Shift+Ctrl+A to deselect.", region_label),
+                "undoable": true, "plan": {}, "tool_results": []
+            }));
+        }
+        if wants_more_contrast_region {
+            run_macro(macros::brightness_contrast_region(0.0, 70.0, region))?;
+            return Ok(json!({
+                "reply": format!("Done! Increased contrast in the {}.", region_label),
+                "explain": format!("To do this yourself in GIMP: choose the Rectangle Select tool (press R) and drag to select the {} of the image. Then go to Colors → Brightness-Contrast and drag the Contrast slider to the right. Click OK, then press Shift+Ctrl+A to deselect.", region_label),
+                "undoable": true, "plan": {}, "tool_results": []
+            }));
+        }
+        if wants_less_contrast_region {
+            run_macro(macros::brightness_contrast_region(0.0, -70.0, region))?;
+            return Ok(json!({
+                "reply": format!("Done! Decreased contrast in the {}.", region_label),
+                "explain": format!("To do this yourself in GIMP: choose the Rectangle Select tool (press R) and drag to select the {} of the image. Then go to Colors → Brightness-Contrast and drag the Contrast slider to the left. Click OK, then press Shift+Ctrl+A to deselect.", region_label),
+                "undoable": true, "plan": {}, "tool_results": []
+            }));
+        }
+        if wants_blur_region {
+            run_macro(macros::blur_region(10.0, region))?;
+            return Ok(json!({
+                "reply": format!("Done! Blurred the {}.", region_label),
+                "explain": format!("To do this yourself in GIMP: choose the Rectangle Select tool (press R) and drag to select the {} of the image. Then go to Filters → Blur → Gaussian Blur, set the size to around 10, and click OK. Press Shift+Ctrl+A to deselect.", region_label),
+                "undoable": true, "plan": {}, "tool_results": []
+            }));
+        }
     }
 
     // Fast Path: Increase brightness
@@ -159,8 +274,12 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
             || lower_prompt.contains("higher")
             || lower_prompt.contains("up"));
     if wants_brighter {
-        run_macro(macros::brightness_contrast(50.0, 0.0))?;
-        return Ok(json!({ "reply": "Done! Increased the brightness.", "undoable": false, "plan": {}, "tool_results": [] }));
+        run_macro(macros::brightness_contrast(70.0, 0.0))?;
+        return Ok(json!({
+            "reply": "Done! Increased the brightness.",
+            "explain": "To do this yourself in GIMP: go to Colors → Brightness-Contrast. Drag the Brightness slider to the right (try around +70). Click OK.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Decrease brightness / make darker
@@ -178,8 +297,12 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
             || lower_prompt.contains("lower")
             || lower_prompt.contains("down"));
     if wants_darker || wants_brightness_decrease {
-        run_macro(macros::brightness_contrast(-50.0, 0.0))?;
-        return Ok(json!({ "reply": "Done! Decreased the brightness.", "undoable": false, "plan": {}, "tool_results": [] }));
+        run_macro(macros::brightness_contrast(-70.0, 0.0))?;
+        return Ok(json!({
+            "reply": "Done! Decreased the brightness.",
+            "explain": "To do this yourself in GIMP: go to Colors → Brightness-Contrast. Drag the Brightness slider to the left (try around −70). Click OK.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Increase contrast
@@ -190,8 +313,12 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
             || lower_prompt.contains("higher")
             || lower_prompt.contains("up"));
     if wants_more_contrast {
-        run_macro(macros::brightness_contrast(0.0, 50.0))?;
-        return Ok(json!({ "reply": "Done! Increased the contrast.", "undoable": false, "plan": {}, "tool_results": [] }));
+        run_macro(macros::brightness_contrast(0.0, 70.0))?;
+        return Ok(json!({
+            "reply": "Done! Increased the contrast.",
+            "explain": "To do this yourself in GIMP: go to Colors → Brightness-Contrast. Drag the Contrast slider to the right (try around +70). Click OK.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Decrease contrast
@@ -202,8 +329,12 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
             || lower_prompt.contains("lower")
             || lower_prompt.contains("down"));
     if wants_less_contrast {
-        run_macro(macros::brightness_contrast(0.0, -50.0))?;
-        return Ok(json!({ "reply": "Done! Decreased the contrast.", "undoable": false, "plan": {}, "tool_results": [] }));
+        run_macro(macros::brightness_contrast(0.0, -70.0))?;
+        return Ok(json!({
+            "reply": "Done! Decreased the contrast.",
+            "explain": "To do this yourself in GIMP: go to Colors → Brightness-Contrast. Drag the Contrast slider to the left (try around −70). Click OK.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Blur
@@ -213,13 +344,21 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
         && !lower_prompt.contains("sharpen");
     if wants_blur {
         run_macro(macros::blur(10.0))?;
-        return Ok(json!({ "reply": "Done! Applied a blur to the image.", "undoable": false, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": "Done! Applied a blur to the image.",
+            "explain": "To do this yourself in GIMP: go to Filters → Blur → Gaussian Blur. Increase the Size value (try 5–10 pixels) and click OK.",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Undo
     if lower_prompt == "undo" || lower_prompt.starts_with("undo ") || lower_prompt == "undo last" {
         run_macro(macros::undo())?;
-        return Ok(json!({ "reply": "↩ Last change undone.", "undoable": false, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": "↩ Last change undone.",
+            "explain": "To undo in GIMP yourself: press Ctrl+Z (or Cmd+Z on Mac), or go to Edit → Undo.",
+            "undoable": false, "plan": {}, "tool_results": []
+        }));
     }
 
     // Fast Path: Square crop ("crop/resize/make to a square", etc.)
@@ -231,7 +370,11 @@ async fn assistant_request(prompt: String) -> Result<Value, String> {
             || lower_prompt.contains("into a"));
     if wants_square_crop {
         macro_crop_square()?;
-        return Ok(json!({ "reply": "Done! Cropped the image to a square.", "undoable": true, "plan": {}, "tool_results": [] }));
+        return Ok(json!({
+            "reply": "Done! Cropped the image to a square.",
+            "explain": "To do this yourself in GIMP: go to Image → Canvas Size, set Width and Height to the same value. Or use Script-Fu → Console and type: (gimp-image-crop image size size x-offset y-offset).",
+            "undoable": true, "plan": {}, "tool_results": []
+        }));
     }
     // STEP 1: Tool selection, small prompt for Ollama
     let selector_prompt = format!(
@@ -259,7 +402,16 @@ User request: {user}
         user = prompt
     );
 
-    let selection_raw = llm_client::chat(&selector_prompt).await?;
+    let selection_raw = match llm_client::chat(&selector_prompt).await {
+        Ok(r) => r,
+        Err(e) if e.contains("localhost:11434") || e.contains("connection refused") || e.contains("error sending request") => {
+            return Ok(json!({
+                "reply": "I don't recognise that command yet, and Ollama isn't running so I can't handle custom requests.\n\nStart Ollama with:\n  ollama serve\n\nOr try one of the built-in commands: draw a circle, blur the image, increase brightness, draw a red heart, blur the top half.",
+                "undoable": false, "plan": {}, "tool_results": []
+            }));
+        }
+        Err(e) => return Err(e),
+    };
 
     // Strip prefix before first '{' and suffix after last '}' (handles markdown fences)
     let sel_start = selection_raw.find('{').unwrap_or(0);
@@ -315,7 +467,8 @@ User request: {user}
 
 Respond ONLY with valid JSON in this format:
 {{
-  "thought": "short explanation",
+  "thought": "short explanation of what you will do",
+  "explain": "2-3 sentences for a beginner describing how to do this manually in GIMP using menus and toolbar. Start with 'To do this yourself in GIMP:'. Do NOT mention Python.",
   "steps": [
     {{
       "tool": "call_api",
@@ -325,10 +478,10 @@ Respond ONLY with valid JSON in this format:
           "pyGObject-console",
           [
             "from gi.repository import Gimp, Gegl",
-            "images = Gimp.get_images()",
-            "image = images[0]",
-            "layers = image.get_layers()",
-            "layer = layers[0]",
+            "image = Gimp.get_images()[0]",
+            "layer = image.flatten()",
+            "w = image.get_width()",
+            "h = image.get_height()",
             "drawable = layer",
             "... your commands ...",
             "Gimp.displays_flush()"
@@ -348,44 +501,80 @@ CRITICAL RULES — violating these causes Python syntax errors or runtime crashe
 5. ONLY use the exact methods listed in VALID GIMP 3 API below. Any other method WILL crash.
 6. NEVER add Python comments (# ...) anywhere in the output — they break JSON parsing.
 7. Output ONLY the JSON object. No prose before it, no notes after it, no backticks.
+8. ALWAYS start with the exact setup block shown: image.flatten() is critical — it merges any stray layers to a single full-canvas layer before drawing.
 
-FORBIDDEN — these methods DO NOT EXIST in GIMP 3, they will always crash:
-- Gimp.polygon()
-- Gimp.draw_polygon()
-- Gimp.draw_line()
-- Gimp.draw_circle()
-- Gimp.draw_ellipse()
-- Gimp.draw_rect()
-- Gimp.draw_rectangle()
-- Gimp.fill()
-- Gimp.rectangle()
-- Gimp.circle()
-- Gimp.ellipse()
-- Gimp.line()
-- image.draw_*()
-- Gimp.Image.draw_*()
-- layer.draw_*()
-- drawable.draw_*()
-- Gimp.text_*()  (text operations are not supported)
-- gimp_*() (old Script-Fu style, not available in GIMP 3)
-Do NOT use any method with "draw_" in the name except the ones explicitly listed below.
+FORBIDDEN — these do NOT exist in GIMP 3 and WILL crash:
+- Gimp.get_pdb().run_procedure(...)   ← PDB has no run_procedure method
+- plug-in-gauss                        ← removed in GIMP 3, use DrawableFilter instead
+- gimp-brightness-contrast             ← old PDB name; use drawable.brightness_contrast()
+- Gimp.polygon(), Gimp.draw_*(), Gimp.fill(), Gimp.rectangle(), Gimp.circle()
+- image.draw_*(), layer.draw_*(), drawable.draw_*()
+- Gimp.text_*() — text is not supported
+- gimp_*() — old Script-Fu style, not available in GIMP 3
+- Gegl.Color.new('pink'), Gegl.Color.new('orange'), Gegl.Color.new('cyan'),
+  Gegl.Color.new('magenta'), Gegl.Color.new('brown') — these return wrong colors, use hex instead
 
-VALID GIMP 3 API (use ONLY these exact method names):
+VALID GIMP 3 API (use ONLY these):
 
-Set color:
+Setup (ALWAYS use this exact block at the start):
   "from gi.repository import Gimp, Gegl"
-  "color = Gegl.Color.new('pink')"
-  "Gimp.context_set_foreground(color)"
-  Color names: red, green, blue, black, white, pink, yellow, orange, purple, cyan, magenta
-
-Get image and layer:
-  "images = Gimp.get_images()"
-  "image = images[0]"
-  "layers = image.get_layers()"
-  "layer = layers[0]"
-  "drawable = layer"
+  "image = Gimp.get_images()[0]"
+  "layer = image.flatten()"    ← merges stray layers, returns the single full-canvas layer
   "w = image.get_width()"
   "h = image.get_height()"
+  "drawable = layer"
+
+Set foreground color:
+  "color = Gegl.Color.new('red')"       ← safe names: red, green, blue, black, white, yellow, purple, gray
+  "color = Gegl.Color.new('#FF69B4')"   ← use hex for: pink=#FF69B4, orange=#FFA500, cyan=#00FFFF, magenta=#FF00FF, brown=#8B4513
+  "Gimp.context_set_foreground(color)"
+
+Draw a line:
+  "Gimp.pencil(drawable, [x1, y1, x2, y2])"
+
+Draw filled ellipse or circle (select then fill):
+  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
+  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
+  "Gimp.Selection.none(image)"
+
+Draw filled rectangle (select then fill):
+  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
+  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
+  "Gimp.Selection.none(image)"
+
+Combine selections (ADD):
+  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, x, y, w, h)"
+  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, x, y, w, h)"
+
+Brightness/contrast (values are floats -1.0 to 1.0, NOT integers):
+  "drawable.brightness_contrast(0.55, 0.0)"    ← brighten (~+70 out of 127)
+  "drawable.brightness_contrast(-0.55, 0.0)"   ← darken
+  "drawable.brightness_contrast(0.0, 0.55)"    ← more contrast
+  "drawable.brightness_contrast(0.0, -0.55)"   ← less contrast
+
+Blur (gaussian via DrawableFilter):
+  "_f = Gimp.DrawableFilter.new(drawable, 'gegl:gaussian-blur', 'blur')"
+  "_f.get_config().set_property('std-dev-x', 3.0)"
+  "_f.get_config().set_property('std-dev-y', 3.0)"
+  "_f.set_opacity(1.0)"
+  "drawable.append_filter(_f)"
+  "drawable.merge_filters()"
+
+Desaturate (grayscale / black and white):
+  "drawable.desaturate(Gimp.DesaturateMode.LUMA)"
+
+Hue / Saturation:
+  "drawable.hue_saturation(Gimp.HueRange.ALL, hue_offset, lightness, saturation, 0.0)"
+  Example — boost saturation by 50: "drawable.hue_saturation(Gimp.HueRange.ALL, 0.0, 0.0, 50.0, 0.0)"
+
+Flip:
+  "image.flip(Gimp.OrientationType.HORIZONTAL)"
+  "image.flip(Gimp.OrientationType.VERTICAL)"
+
+Rotate:
+  "image.rotate(Gimp.RotationType.DEGREES90)"
+  "image.rotate(Gimp.RotationType.DEGREES180)"
+  "image.rotate(Gimp.RotationType.DEGREES270)"
 
 Scale image:
   "image.scale(new_width, new_height)"
@@ -393,36 +582,13 @@ Scale image:
 Crop image:
   "image.crop(new_width, new_height, offset_x, offset_y)"
 
-Draw a line (the ONLY way to draw lines):
-  "Gimp.pencil(drawable, [x1, y1, x2, y2])"
-
-Draw a filled ellipse or circle (select then fill — no direct draw method):
-  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
-  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
-  "Gimp.Selection.none(image)"
-
-Draw a filled rectangle (select then fill — no direct draw method):
-  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
-  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
-  "Gimp.Selection.none(image)"
-
-Combine shapes with ADD to selection:
-  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, x2, y2, w2, h2)"
-  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, x2, y2, w2, h2)"
-
-Brightness/contrast:
-  "Gimp.get_pdb().run_procedure('gimp-brightness-contrast', [Gimp.RunMode.NONINTERACTIVE, drawable, b, c])"
-
-Blur:
-  "Gimp.get_pdb().run_procedure('plug-in-gauss', [Gimp.RunMode.NONINTERACTIVE, image, drawable, radius, radius, 0])"
-
-Flush display (always include as last step):
+Flush display (always last):
   "Gimp.displays_flush()"
 
-EXAMPLE — draw a pink heart in the center. Note the exact args structure: args[0] is always "pyGObject-console", args[1] is the array of Python lines.
-
+EXAMPLE — rotate the image 90 degrees clockwise:
 {{
-  "thought": "Draw a pink heart using two ellipses and a rectangle",
+  "thought": "Rotate the image 90 degrees clockwise using image.rotate",
+  "explain": "To do this yourself in GIMP: go to Image → Transform → Rotate 90° clockwise.",
   "steps": [
     {{
       "tool": "call_api",
@@ -432,23 +598,12 @@ EXAMPLE — draw a pink heart in the center. Note the exact args structure: args
           "pyGObject-console",
           [
             "from gi.repository import Gimp, Gegl",
-            "images = Gimp.get_images()",
-            "image = images[0]",
-            "layers = image.get_layers()",
-            "layer = layers[0]",
-            "drawable = layer",
+            "image = Gimp.get_images()[0]",
+            "layer = image.flatten()",
             "w = image.get_width()",
             "h = image.get_height()",
-            "cx = w // 2",
-            "cy = h // 2",
-            "s = min(w, h) // 6",
-            "pink = Gegl.Color.new('pink')",
-            "Gimp.context_set_foreground(pink)",
-            "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, cx - s, cy - s, s, s)",
-            "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, cx, cy - s, s, s)",
-            "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s, cy, s * 2, s)",
-            "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)",
-            "Gimp.Selection.none(image)",
+            "drawable = layer",
+            "image.rotate(Gimp.RotationType.DEGREES90)",
             "Gimp.displays_flush()"
           ]
         ],
@@ -723,8 +878,15 @@ EXAMPLE — draw a pink heart in the center. Note the exact args structure: args
         && !reply_text.starts_with("You are using")
         && !reply_text.starts_with("Your current image");
 
+    // Extract the explain text the LLM wrote into the plan (if any)
+    let explain_text = plan
+        .get("explain")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string());
+
     Ok(json!({
         "reply": reply_text,
+        "explain": explain_text,
         "undoable": undoable,
         "plan": plan,
         "tool_results": tool_results

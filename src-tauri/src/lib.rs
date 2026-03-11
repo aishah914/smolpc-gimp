@@ -402,7 +402,16 @@ User request: {user}
         user = prompt
     );
 
-    let selection_raw = llm_client::chat(&selector_prompt).await?;
+    let selection_raw = match llm_client::chat(&selector_prompt).await {
+        Ok(r) => r,
+        Err(e) if e.contains("localhost:11434") || e.contains("connection refused") || e.contains("error sending request") => {
+            return Ok(json!({
+                "reply": "I don't recognise that command yet, and Ollama isn't running so I can't handle custom requests.\n\nStart Ollama with:\n  ollama serve\n\nOr try one of the built-in commands: draw a circle, blur the image, increase brightness, draw a red heart, blur the top half.",
+                "undoable": false, "plan": {}, "tool_results": []
+            }));
+        }
+        Err(e) => return Err(e),
+    };
 
     // Strip prefix before first '{' and suffix after last '}' (handles markdown fences)
     let sel_start = selection_raw.find('{').unwrap_or(0);
@@ -458,7 +467,8 @@ User request: {user}
 
 Respond ONLY with valid JSON in this format:
 {{
-  "thought": "short explanation",
+  "thought": "short explanation of what you will do",
+  "explain": "2-3 sentences for a beginner describing how to do this manually in GIMP using menus and toolbar. Start with 'To do this yourself in GIMP:'. Do NOT mention Python.",
   "steps": [
     {{
       "tool": "call_api",
@@ -468,10 +478,10 @@ Respond ONLY with valid JSON in this format:
           "pyGObject-console",
           [
             "from gi.repository import Gimp, Gegl",
-            "images = Gimp.get_images()",
-            "image = images[0]",
-            "layers = image.get_layers()",
-            "layer = layers[0]",
+            "image = Gimp.get_images()[0]",
+            "layer = image.flatten()",
+            "w = image.get_width()",
+            "h = image.get_height()",
             "drawable = layer",
             "... your commands ...",
             "Gimp.displays_flush()"
@@ -491,44 +501,80 @@ CRITICAL RULES — violating these causes Python syntax errors or runtime crashe
 5. ONLY use the exact methods listed in VALID GIMP 3 API below. Any other method WILL crash.
 6. NEVER add Python comments (# ...) anywhere in the output — they break JSON parsing.
 7. Output ONLY the JSON object. No prose before it, no notes after it, no backticks.
+8. ALWAYS start with the exact setup block shown: image.flatten() is critical — it merges any stray layers to a single full-canvas layer before drawing.
 
-FORBIDDEN — these methods DO NOT EXIST in GIMP 3, they will always crash:
-- Gimp.polygon()
-- Gimp.draw_polygon()
-- Gimp.draw_line()
-- Gimp.draw_circle()
-- Gimp.draw_ellipse()
-- Gimp.draw_rect()
-- Gimp.draw_rectangle()
-- Gimp.fill()
-- Gimp.rectangle()
-- Gimp.circle()
-- Gimp.ellipse()
-- Gimp.line()
-- image.draw_*()
-- Gimp.Image.draw_*()
-- layer.draw_*()
-- drawable.draw_*()
-- Gimp.text_*()  (text operations are not supported)
-- gimp_*() (old Script-Fu style, not available in GIMP 3)
-Do NOT use any method with "draw_" in the name except the ones explicitly listed below.
+FORBIDDEN — these do NOT exist in GIMP 3 and WILL crash:
+- Gimp.get_pdb().run_procedure(...)   ← PDB has no run_procedure method
+- plug-in-gauss                        ← removed in GIMP 3, use DrawableFilter instead
+- gimp-brightness-contrast             ← old PDB name; use drawable.brightness_contrast()
+- Gimp.polygon(), Gimp.draw_*(), Gimp.fill(), Gimp.rectangle(), Gimp.circle()
+- image.draw_*(), layer.draw_*(), drawable.draw_*()
+- Gimp.text_*() — text is not supported
+- gimp_*() — old Script-Fu style, not available in GIMP 3
+- Gegl.Color.new('pink'), Gegl.Color.new('orange'), Gegl.Color.new('cyan'),
+  Gegl.Color.new('magenta'), Gegl.Color.new('brown') — these return wrong colors, use hex instead
 
-VALID GIMP 3 API (use ONLY these exact method names):
+VALID GIMP 3 API (use ONLY these):
 
-Set color:
+Setup (ALWAYS use this exact block at the start):
   "from gi.repository import Gimp, Gegl"
-  "color = Gegl.Color.new('pink')"
-  "Gimp.context_set_foreground(color)"
-  Color names: red, green, blue, black, white, pink, yellow, orange, purple, cyan, magenta
-
-Get image and layer:
-  "images = Gimp.get_images()"
-  "image = images[0]"
-  "layers = image.get_layers()"
-  "layer = layers[0]"
-  "drawable = layer"
+  "image = Gimp.get_images()[0]"
+  "layer = image.flatten()"    ← merges stray layers, returns the single full-canvas layer
   "w = image.get_width()"
   "h = image.get_height()"
+  "drawable = layer"
+
+Set foreground color:
+  "color = Gegl.Color.new('red')"       ← safe names: red, green, blue, black, white, yellow, purple, gray
+  "color = Gegl.Color.new('#FF69B4')"   ← use hex for: pink=#FF69B4, orange=#FFA500, cyan=#00FFFF, magenta=#FF00FF, brown=#8B4513
+  "Gimp.context_set_foreground(color)"
+
+Draw a line:
+  "Gimp.pencil(drawable, [x1, y1, x2, y2])"
+
+Draw filled ellipse or circle (select then fill):
+  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
+  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
+  "Gimp.Selection.none(image)"
+
+Draw filled rectangle (select then fill):
+  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
+  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
+  "Gimp.Selection.none(image)"
+
+Combine selections (ADD):
+  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, x, y, w, h)"
+  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, x, y, w, h)"
+
+Brightness/contrast (values are floats -1.0 to 1.0, NOT integers):
+  "drawable.brightness_contrast(0.55, 0.0)"    ← brighten (~+70 out of 127)
+  "drawable.brightness_contrast(-0.55, 0.0)"   ← darken
+  "drawable.brightness_contrast(0.0, 0.55)"    ← more contrast
+  "drawable.brightness_contrast(0.0, -0.55)"   ← less contrast
+
+Blur (gaussian via DrawableFilter):
+  "_f = Gimp.DrawableFilter.new(drawable, 'gegl:gaussian-blur', 'blur')"
+  "_f.get_config().set_property('std-dev-x', 3.0)"
+  "_f.get_config().set_property('std-dev-y', 3.0)"
+  "_f.set_opacity(1.0)"
+  "drawable.append_filter(_f)"
+  "drawable.merge_filters()"
+
+Desaturate (grayscale / black and white):
+  "drawable.desaturate(Gimp.DesaturateMode.LUMA)"
+
+Hue / Saturation:
+  "drawable.hue_saturation(Gimp.HueRange.ALL, hue_offset, lightness, saturation, 0.0)"
+  Example — boost saturation by 50: "drawable.hue_saturation(Gimp.HueRange.ALL, 0.0, 0.0, 50.0, 0.0)"
+
+Flip:
+  "image.flip(Gimp.OrientationType.HORIZONTAL)"
+  "image.flip(Gimp.OrientationType.VERTICAL)"
+
+Rotate:
+  "image.rotate(Gimp.RotationType.DEGREES90)"
+  "image.rotate(Gimp.RotationType.DEGREES180)"
+  "image.rotate(Gimp.RotationType.DEGREES270)"
 
 Scale image:
   "image.scale(new_width, new_height)"
@@ -536,36 +582,13 @@ Scale image:
 Crop image:
   "image.crop(new_width, new_height, offset_x, offset_y)"
 
-Draw a line (the ONLY way to draw lines):
-  "Gimp.pencil(drawable, [x1, y1, x2, y2])"
-
-Draw a filled ellipse or circle (select then fill — no direct draw method):
-  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
-  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
-  "Gimp.Selection.none(image)"
-
-Draw a filled rectangle (select then fill — no direct draw method):
-  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.REPLACE, x, y, width, height)"
-  "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)"
-  "Gimp.Selection.none(image)"
-
-Combine shapes with ADD to selection:
-  "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, x2, y2, w2, h2)"
-  "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, x2, y2, w2, h2)"
-
-Brightness/contrast:
-  "Gimp.get_pdb().run_procedure('gimp-brightness-contrast', [Gimp.RunMode.NONINTERACTIVE, drawable, b, c])"
-
-Blur:
-  "Gimp.get_pdb().run_procedure('plug-in-gauss', [Gimp.RunMode.NONINTERACTIVE, image, drawable, radius, radius, 0])"
-
-Flush display (always include as last step):
+Flush display (always last):
   "Gimp.displays_flush()"
 
-EXAMPLE — draw a pink heart in the center. Note the exact args structure: args[0] is always "pyGObject-console", args[1] is the array of Python lines.
-
+EXAMPLE — rotate the image 90 degrees clockwise:
 {{
-  "thought": "Draw a pink heart using two ellipses and a rectangle",
+  "thought": "Rotate the image 90 degrees clockwise using image.rotate",
+  "explain": "To do this yourself in GIMP: go to Image → Transform → Rotate 90° clockwise.",
   "steps": [
     {{
       "tool": "call_api",
@@ -575,23 +598,12 @@ EXAMPLE — draw a pink heart in the center. Note the exact args structure: args
           "pyGObject-console",
           [
             "from gi.repository import Gimp, Gegl",
-            "images = Gimp.get_images()",
-            "image = images[0]",
-            "layers = image.get_layers()",
-            "layer = layers[0]",
-            "drawable = layer",
+            "image = Gimp.get_images()[0]",
+            "layer = image.flatten()",
             "w = image.get_width()",
             "h = image.get_height()",
-            "cx = w // 2",
-            "cy = h // 2",
-            "s = min(w, h) // 6",
-            "pink = Gegl.Color.new('pink')",
-            "Gimp.context_set_foreground(pink)",
-            "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.REPLACE, cx - s, cy - s, s, s)",
-            "Gimp.Image.select_ellipse(image, Gimp.ChannelOps.ADD, cx, cy - s, s, s)",
-            "Gimp.Image.select_rectangle(image, Gimp.ChannelOps.ADD, cx - s, cy, s * 2, s)",
-            "Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)",
-            "Gimp.Selection.none(image)",
+            "drawable = layer",
+            "image.rotate(Gimp.RotationType.DEGREES90)",
             "Gimp.displays_flush()"
           ]
         ],
@@ -866,8 +878,15 @@ EXAMPLE — draw a pink heart in the center. Note the exact args structure: args
         && !reply_text.starts_with("You are using")
         && !reply_text.starts_with("Your current image");
 
+    // Extract the explain text the LLM wrote into the plan (if any)
+    let explain_text = plan
+        .get("explain")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string());
+
     Ok(json!({
         "reply": reply_text,
+        "explain": explain_text,
         "undoable": undoable,
         "plan": plan,
         "tool_results": tool_results
